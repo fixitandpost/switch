@@ -1,47 +1,47 @@
 {
     "dependencies": {
         "obs-studio": {
-            "version": "31.1.0",
+            "version": "31.1.1",
             "baseUrl": "https://github.com/obsproject/obs-studio/archive/refs/tags",
             "label": "OBS sources",
             "hashes": {
-                "macos": "ba903f3848cfabd9ea1205aea14b69e83a2eb43ad6f3f7cc80a6a900bce0e56e",
-                "windows-x64": "ca4b7513bb0b34c708f1cc89016f6ed879b710c912a93387e9f83445c1fc68bb"
+                "macos": "39751f067bacc13d44b116c5138491b5f1391f91516d3d590d874edd21292291",
+                "windows-x64": "2c8427c10b55ac6d68008df2e9a3e82f4647aaad18f105e30d4713c2de678ccf"
             }
         },
         "prebuilt": {
-            "version": "2025-05-23",
+            "version": "2025-08-23",
             "baseUrl": "https://github.com/obsproject/obs-deps/releases/download",
             "label": "Pre-Built obs-deps",
             "hashes": {
-                "macos": "7b1448581b92c6f8d4e2f9b1b10eb318ebfc4df7255638e05bacb49b620e190d",
-                "windows-x64": "88dc7bab50542b4b58194cdd5d7e6f4b73cde7c0d1ee7a040a6d9c9df05187b1"
+                "macos": "9403bb43fb0a9bb215739a5659ca274fe884dbbbcd22bd9ca781c961fb041c42",
+                "windows-x64": "8de229cff6f1981508c0eb646b35e644633a5855787b9f5d3b90ae2aeb87ffc1"
             }
         },
         "qt6": {
-            "version": "2025-05-23",
+            "version": "2025-08-23",
             "baseUrl": "https://github.com/obsproject/obs-deps/releases/download",
             "label": "Pre-Built Qt6",
             "hashes": {
-                "macos": "d4945fe719d31d353dc76298f58823d7891126e33af5029f763427ea9f80bfaa",
-                "windows-x64": "bd80383dc799c0bba2f7fae793613b3fbd2cc3a3712b3d3b63b490721d187d9e"
+                "macos": "990f11638b80a4509e14e8c315f6e4caa0861e37fcd3113a256fbff835ffca29",
+                "windows-x64": "c62e82483bc7c0bf199e8ac3220c66a85a6e8a0cd69a05b6d44f873b830e415f"
             },
             "debugSymbols": {
-                "windows-x64": "9c9a15c5dbe59eb6a1c31c06b7208f3c4403671fbdfaef341cac3beb7af24ea1"
+                "windows-x64": "aae88a17e0211cb37db6a8602f2e20d69255be1f9700c699008ca5adbce1dde2"
             }
         }
     },
     "platformConfig": {
         "macos": {
-            "bundleId": "com.exeldro.source-dock"
+            "bundleId": "com.fixitandpost.switcher"
         }
     },
-    "name": "source-dock",
-    "displayName": "Source Dock",
+    "name": "switcher",
+    "displayName": "Switcher",
     "version": "0.5.1",
-    "author": "Exeldro",
-    "website": "https://exeldro.com",
-    "email": "exelsor@hotmail.com",
+    "author": "Fix It & Post",
+    "website": "https://github.com/fixitandpost/switcher",
+    "email": "",
     "uuids": {
         "windowsApp": "B03BEF5F-1366-42F4-92EF-C5BC8C4FB9AA"
     }

@@ -30,12 +30,23 @@ set(
 )
 # gersemi: on
 
+# Prohibit in-source builds
+if("${CMAKE_CURRENT_BINARY_DIR}" STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}")
+  message(
+    FATAL_ERROR
+    "In-source builds are not supported. "
+    "Specify a build directory via 'cmake -S <SOURCE DIRECTORY> -B <BUILD_DIRECTORY>' instead."
+  )
+  file(REMOVE_RECURSE "${CMAKE_CURRENT_SOURCE_DIR}/CMakeCache.txt" "${CMAKE_CURRENT_SOURCE_DIR}/CMakeFiles")
+endif()
+
 # Add common module directories to default search path
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake/common")
 
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/buildspec.json" buildspec)
 
 string(JSON _name GET ${buildspec} name)
+string(JSON _displayName ERROR_VARIABLE _display_name_error GET ${buildspec} displayName)
 string(JSON _website GET ${buildspec} website)
 string(JSON _author GET ${buildspec} author)
 string(JSON _email GET ${buildspec} email)
@@ -44,6 +55,11 @@ string(JSON _bundleId GET ${buildspec} platformConfig macos bundleId)
 string(JSON _uuidApp GET ${buildspec} uuids windowsApp)
 
 set(PLUGIN_AUTHOR ${_author})
+if(_display_name_error)
+  set(PLUGIN_DISPLAY_NAME ${_name})
+else()
+  set(PLUGIN_DISPLAY_NAME ${_displayName})
+endif()
 set(PLUGIN_WEBSITE ${_website})
 set(PLUGIN_EMAIL ${_email})
 set(PLUGIN_VERSION ${_version})

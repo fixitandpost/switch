@@ -1,5 +1,5 @@
 
-#include "source-dock-settings.hpp"
+#include "switcher-settings.hpp"
 
 #include <QLabel>
 
@@ -11,7 +11,7 @@
 #include <QScrollArea>
 #include <QTextEdit>
 
-#include "source-dock.hpp"
+#include "switcher-dock.hpp"
 
 #ifndef QT_UTF8
 #define QT_UTF8(str) QString::fromUtf8(str)
@@ -20,7 +20,7 @@
 #define QT_TO_UTF8(str) str.toUtf8().constData()
 #endif
 
-SourceDockSettingsDialog::SourceDockSettingsDialog(QMainWindow *parent)
+SwitcherSettingsDialog::SwitcherSettingsDialog(QMainWindow *parent)
 	: QDialog(parent),
 	  mainLayout(new QGridLayout),
 	  sourceCombo(new QComboBox()),
@@ -223,19 +223,19 @@ SourceDockSettingsDialog::SourceDockSettingsDialog(QMainWindow *parent)
 	vlayout->addLayout(bottomLayout);
 	setLayout(vlayout);
 
-	setWindowTitle(QT_UTF8(obs_module_text("SourceDocks")));
+	setWindowTitle(QT_UTF8(obs_module_text("SwitcherDocks")));
 	setSizeGripEnabled(true);
 
 	setMinimumSize(200, 200);
 }
 
-SourceDockSettingsDialog::~SourceDockSettingsDialog() {}
+SwitcherSettingsDialog::~SwitcherSettingsDialog() {}
 
-QMainWindow *GetSourceWindowByTitle(const QString window_name)
+QMainWindow *GetSwitcherWindowByTitle(const QString window_name)
 {
 	if (window_name.isEmpty())
 		return nullptr;
-	for (const auto &it : source_windows) {
+	for (const auto &it : switcher_windows) {
 		if (it->windowTitle() == window_name) {
 			return it;
 		}
@@ -256,13 +256,13 @@ QMainWindow *GetSourceWindowByTitle(const QString window_name)
 	window->setCorner(Qt::BottomRightCorner, main_window->corner(Qt::BottomRightCorner));
 	window->setCorner(Qt::BottomLeftCorner, main_window->corner(Qt::BottomLeftCorner));
 	window->show();
-	source_windows.push_back(window);
+	switcher_windows.push_back(window);
 	return window;
 }
 
 void update_selected_source();
 
-void SourceDockSettingsDialog::AddClicked()
+void SwitcherSettingsDialog::AddClicked()
 {
 	const auto sn = sourceCombo->currentText();
 	if (sn.isEmpty())
@@ -282,11 +282,11 @@ void SourceDockSettingsDialog::AddClicked()
 	}
 
 	auto window_name = windowEdit->text();
-	QMainWindow *main_window = GetSourceWindowByTitle(window_name);
+	QMainWindow *main_window = GetSwitcherWindowByTitle(window_name);
 	if (main_window == nullptr)
 		main_window = static_cast<QMainWindow *>(obs_frontend_get_main_window());
 
-	auto *tmp = new SourceDock(title, source == nullptr, main_window);
+	auto *tmp = new SwitcherDock(title, source == nullptr, main_window);
 	if (source)
 		tmp->SetSource(source);
 	if (previewCheckBox->isChecked())
@@ -315,7 +315,7 @@ void SourceDockSettingsDialog::AddClicked()
 		delete tmp;
 		return;
 	}
-	source_docks.push_back(tmp);
+	switcher_docks.push_back(tmp);
 	const auto dock = static_cast<QDockWidget *>(tmp->parentWidget());
 
 	if (visibleCheckBox->isChecked())
@@ -336,7 +336,7 @@ void SourceDockSettingsDialog::AddClicked()
 	RefreshTable();
 }
 
-void SourceDockSettingsDialog::RefreshTable()
+void SwitcherSettingsDialog::RefreshTable()
 {
 	for (auto row = mainLayout->rowCount() - 1; row >= 2; row--) {
 		for (auto col = mainLayout->columnCount() - 1; col >= 0; col--) {
@@ -349,11 +349,11 @@ void SourceDockSettingsDialog::RefreshTable()
 		}
 	}
 	auto row = 2;
-	SourceDock *dock = nullptr;
+	SwitcherDock *dock = nullptr;
 	const auto sourceName = sourceCombo->currentText();
 	const auto title = titleEdit->text();
 	const auto window = windowEdit->text();
-	for (const auto &it : source_docks) {
+	for (const auto &it : switcher_docks) {
 		if (!sourceName.isEmpty() && !it->objectName().contains(sourceName, Qt::CaseInsensitive))
 			continue;
 		QString t = it->windowTitle();
@@ -572,7 +572,7 @@ void SourceDockSettingsDialog::RefreshTable()
 	}
 }
 
-void SourceDockSettingsDialog::mouseDoubleClickEvent(QMouseEvent *event)
+void SwitcherSettingsDialog::mouseDoubleClickEvent(QMouseEvent *event)
 {
 	QWidget *widget = childAt(event->pos());
 	if (!widget)
@@ -609,7 +609,7 @@ void SourceDockSettingsDialog::mouseDoubleClickEvent(QMouseEvent *event)
 	titleEdit->setText(title);
 }
 
-void SourceDockSettingsDialog::DeleteClicked()
+void SwitcherSettingsDialog::DeleteClicked()
 {
 	for (auto row = 2; row < mainLayout->rowCount(); row++) {
 		auto *item = mainLayout->itemAtPosition(row, selectBoxColumn);
@@ -629,7 +629,7 @@ void SourceDockSettingsDialog::DeleteClicked()
 		if (!label)
 			continue;
 		auto title = label->text();
-		for (auto it = source_docks.begin(); it != source_docks.end();) {
+		for (auto it = switcher_docks.begin(); it != switcher_docks.end();) {
 			if ((*it)->windowTitle() != title) {
 				++it;
 				continue;
@@ -639,13 +639,13 @@ void SourceDockSettingsDialog::DeleteClicked()
 				continue;
 			}
 			obs_frontend_remove_dock((*it)->objectName().toUtf8().constData());
-			it = source_docks.erase(it);
+			it = switcher_docks.erase(it);
 		}
 	}
 	RefreshTable();
 }
 
-void SourceDockSettingsDialog::SelectAllChanged()
+void SwitcherSettingsDialog::SelectAllChanged()
 {
 	auto *item = mainLayout->itemAtPosition(0, selectBoxColumn);
 	auto *checkBox = dynamic_cast<QCheckBox *>(item->widget());
@@ -661,7 +661,7 @@ void SourceDockSettingsDialog::SelectAllChanged()
 	}
 }
 
-bool SourceDockSettingsDialog::AddSource(void *data, obs_source_t *source)
+bool SwitcherSettingsDialog::AddSource(void *data, obs_source_t *source)
 {
 	const char *sn = obs_source_get_name(source);
 	auto sourceCombo = static_cast<QComboBox *>(data);

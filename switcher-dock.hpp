@@ -72,7 +72,7 @@ protected:
 	virtual void wheelEvent(QWheelEvent *event) override;
 };
 
-class SourceDock : public QSplitter {
+class SwitcherDock : public QSplitter {
 	Q_OBJECT
 
 private:
@@ -87,6 +87,7 @@ private:
 	bool selected;
 
 	OBSQTDisplay *preview = nullptr;
+	bool previewShowing = false;
 	VolumeMeter *volMeter = nullptr;
 	QWidget *volMeterWidget = nullptr;
 	obs_volmeter_t *obs_volmeter = nullptr;
@@ -145,8 +146,8 @@ private slots:
 	void SetActive(int active);
 
 public:
-	SourceDock(QString name, bool selected, QWidget *parent = nullptr);
-	~SourceDock();
+	SwitcherDock(QString name, bool selected, QWidget *parent = nullptr);
+	~SwitcherDock();
 
 	void SetSource(const OBSSource source_);
 	OBSSource GetSource();
@@ -215,5 +216,5 @@ public:
 	bool restoreSplitState(const QByteArray &splitState);
 };
 
-inline std::list<SourceDock *> source_docks;
-inline std::list<QMainWindow *> source_windows;
+inline std::list<SwitcherDock *> switcher_docks;
+inline std::list<QMainWindow *> switcher_windows;

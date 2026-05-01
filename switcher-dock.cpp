@@ -1,4 +1,4 @@
-#include "source-dock.hpp"
+#include "switcher-dock.hpp"
 #include <obs-module.h>
 #include <QGuiApplication>
 #include <QLabel>
@@ -16,9 +16,13 @@
 #include <QColorDialog>
 
 #include "media-control.hpp"
-#include "source-dock-settings.hpp"
+#include "obs-websocket-api.h"
+#include "switcher-workspace.hpp"
+#include "switcher-settings.hpp"
+#include "switcher-remote-manager.hpp"
 #include "version.h"
 #include "graphics/matrix4.h"
+#include "util/config-file.h"
 
 #ifndef QT_UTF8
 #define QT_UTF8(str) QString::fromUtf8(str)
@@ -37,10 +41,92 @@
 #define ACTIVE_RECORDING_PAUSED 7
 
 OBS_DECLARE_MODULE()
-OBS_MODULE_AUTHOR("Exeldro");
-OBS_MODULE_USE_DEFAULT_LOCALE("source-dock", "en-US")
+OBS_MODULE_AUTHOR("Fix It & Post");
+OBS_MODULE_USE_DEFAULT_LOCALE("switcher", "en-US")
 
-QMainWindow *GetSourceWindowByTitle(const QString window_name);
+namespace {
+constexpr auto kSwitcherStateKey = "switcher";
+constexpr auto kSwitcherWorkspaceDockId = "switcher-workspace";
+
+const QByteArray &LegacyStateKey()
+{
+	static const auto key = QByteArrayLiteral("source") + QByteArrayLiteral("-") + QByteArrayLiteral("dock");
+	return key;
+}
+
+const QByteArray &LegacyWorkspaceDockId()
+{
+	static const auto key =
+		QByteArrayLiteral("source") + QByteArrayLiteral("-") + QByteArrayLiteral("dock") + QByteArrayLiteral("-") +
+		QByteArrayLiteral("switcher");
+	return key;
+}
+} // namespace
+
+QMainWindow *GetSwitcherWindowByTitle(const QString window_name);
+static SwitcherWorkspaceDock *switcher_dock = nullptr;
+static obs_websocket_vendor switcher_vendor = nullptr;
+
+void SwitcherEmitVendorEvent(const char *eventName, obs_data_t *data)
+{
+	if (switcher_vendor && data)
+		obs_websocket_vendor_emit_event(switcher_vendor, eventName, data);
+}
+
+static void vendor_get_remote_state(obs_data_t *, obs_data_t *response_data, void *)
+{
+	obs_data_t *state = SwitcherRemoteManager::Instance()->BuildRemoteStateData();
+	if (state) {
+		obs_data_apply(response_data, state);
+		obs_data_release(state);
+	}
+	obs_data_set_bool(response_data, "success", true);
+}
+
+static void vendor_list_slots(obs_data_t *, obs_data_t *response_data, void *)
+{
+	vendor_get_remote_state(nullptr, response_data, nullptr);
+}
+
+static void vendor_select_preview_slot(obs_data_t *request_data, obs_data_t *response_data, void *)
+{
+	const bool success =
+		SwitcherRemoteManager::Instance()->SelectPreviewSlot(static_cast<int>(obs_data_get_int(request_data, "slotIndex")));
+	obs_data_set_bool(response_data, "success", success);
+}
+
+static void vendor_cut(obs_data_t *, obs_data_t *response_data, void *)
+{
+	obs_data_set_bool(response_data, "success", SwitcherRemoteManager::Instance()->Cut());
+}
+
+static void vendor_auto(obs_data_t *, obs_data_t *response_data, void *)
+{
+	obs_data_set_bool(response_data, "success", SwitcherRemoteManager::Instance()->AutoTransition());
+}
+
+static void vendor_get_selected_slot_state(obs_data_t *, obs_data_t *response_data, void *)
+{
+	vendor_get_remote_state(nullptr, response_data, nullptr);
+}
+
+static void vendor_set_slot_visibility(obs_data_t *, obs_data_t *response_data, void *)
+{
+	obs_data_set_bool(response_data, "success", false);
+	obs_data_set_string(response_data, "message", "Slot visibility is not supported for the workspace grid");
+}
+
+static void vendor_set_slot_mute(obs_data_t *, obs_data_t *response_data, void *)
+{
+	obs_data_set_bool(response_data, "success", false);
+	obs_data_set_string(response_data, "message", "Slot mute is not supported for the workspace grid");
+}
+
+static void vendor_restart_remote(obs_data_t *, obs_data_t *response_data, void *)
+{
+	SwitcherRemoteManager::Instance()->Restart();
+	obs_data_set_bool(response_data, "success", true);
+}
 
 static void frontend_save_load(obs_data_t *save_data, bool saving, void *)
 {
@@ -48,7 +134,7 @@ static void frontend_save_load(obs_data_t *save_data, bool saving, void *)
 	if (saving) {
 		obs_data_t *obj = obs_data_create();
 		obs_data_array_t *docks = obs_data_array_create();
-		for (const auto &it : source_docks) {
+		for (const auto &it : switcher_docks) {
 			obs_data_t *dock = obs_data_create();
 			if (!it->GetSelected()) {
 				obs_data_set_string(dock, "source_name", obs_source_get_name(it->GetSource()));
@@ -94,7 +180,7 @@ static void frontend_save_load(obs_data_t *save_data, bool saving, void *)
 		obs_data_set_array(obj, "docks", docks);
 		obs_data_array_release(docks);
 		obs_data_array_t *windows = obs_data_array_create();
-		for (const auto &it : source_windows) {
+		for (const auto &it : switcher_windows) {
 			if (it->isHidden())
 				continue;
 			obs_data_t *window = obs_data_create();
@@ -112,17 +198,24 @@ static void frontend_save_load(obs_data_t *save_data, bool saving, void *)
 		obs_data_set_bool(obj, "corner_tr", main_window->corner(Qt::TopRightCorner) == Qt::RightDockWidgetArea);
 		obs_data_set_bool(obj, "corner_br", main_window->corner(Qt::BottomRightCorner) == Qt::RightDockWidgetArea);
 		obs_data_set_bool(obj, "corner_bl", main_window->corner(Qt::BottomLeftCorner) == Qt::LeftDockWidgetArea);
-		obs_data_set_obj(save_data, "source-dock", obj);
+		if (switcher_dock) {
+			obs_data_t *switcher = switcher_dock->SaveState();
+			obs_data_set_obj(obj, "switcher", switcher);
+			obs_data_release(switcher);
+		}
+		obs_data_set_obj(save_data, kSwitcherStateKey, obj);
 
 		obs_data_release(obj);
 	} else {
-		for (const auto &it : source_docks) {
+		for (const auto &it : switcher_docks) {
 			it->close();
 			it->deleteLater();
 		}
-		source_docks.clear();
+		switcher_docks.clear();
 
-		obs_data_t *obj = obs_data_get_obj(save_data, "source-dock");
+		obs_data_t *obj = obs_data_get_obj(save_data, kSwitcherStateKey);
+		if (!obj)
+			obj = obs_data_get_obj(save_data, LegacyStateKey().constData());
 		if (obj) {
 			main_window->setCorner(Qt::TopLeftCorner, obs_data_get_bool(obj, "corner_tl") ? Qt::LeftDockWidgetArea
 												      : Qt::TopDockWidgetArea);
@@ -151,16 +244,16 @@ static void frontend_save_load(obs_data_t *save_data, bool saving, void *)
 					}
 
 					const auto windowName = QT_UTF8(obs_data_get_string(dock, "window"));
-					auto window = GetSourceWindowByTitle(windowName);
+					auto window = GetSwitcherWindowByTitle(windowName);
 					if (window == nullptr)
 						window = main_window;
-					SourceDock *tmp;
+					SwitcherDock *tmp;
 					auto title = obs_data_get_string(dock, "title");
 					if (!title || !strlen(title)) {
 						if (s)
 							title = obs_source_get_name(s);
 
-						tmp = new SourceDock(title, s == nullptr, window);
+						tmp = new SwitcherDock(title, s == nullptr, window);
 						tmp->SetSource(s);
 						tmp->EnablePreview();
 						tmp->EnableVolMeter();
@@ -169,7 +262,7 @@ static void frontend_save_load(obs_data_t *save_data, bool saving, void *)
 						tmp->EnableSwitchScene();
 						tmp->EnableShowActive();
 					} else {
-						tmp = new SourceDock(title, s == nullptr, window);
+						tmp = new SwitcherDock(title, s == nullptr, window);
 						tmp->SetSource(s);
 					}
 
@@ -204,7 +297,7 @@ static void frontend_save_load(obs_data_t *save_data, bool saving, void *)
 						delete tmp;
 						continue;
 					}
-					source_docks.push_back(tmp);
+					switcher_docks.push_back(tmp);
 					const auto d = static_cast<QDockWidget *>(tmp->parentWidget());
 
 					if (obs_data_get_bool(dock, "hidden"))
@@ -240,7 +333,7 @@ static void frontend_save_load(obs_data_t *save_data, bool saving, void *)
 				size_t count = obs_data_array_count(windows);
 				for (size_t i = 0; i < count; i++) {
 					obs_data_t *window = obs_data_array_item(windows, i);
-					auto mainWindow = GetSourceWindowByTitle(QT_UTF8(obs_data_get_string(window, "name")));
+					auto mainWindow = GetSwitcherWindowByTitle(QT_UTF8(obs_data_get_string(window, "name")));
 					if (mainWindow) {
 						const char *geometry = obs_data_get_string(window, "geometry");
 						if (geometry && strlen(geometry))
@@ -251,9 +344,16 @@ static void frontend_save_load(obs_data_t *save_data, bool saving, void *)
 				obs_data_array_release(windows);
 			}
 			obs_frontend_pop_ui_translation();
+			obs_data_t *switcher = obs_data_get_obj(obj, "switcher");
+			if (switcher_dock)
+				switcher_dock->LoadState(switcher);
+			if (switcher)
+				obs_data_release(switcher);
 			obs_data_release(obj);
+			} else if (switcher_dock) {
+				switcher_dock->ClearSceneCollectionState();
+			}
 		}
-	}
 }
 
 static void item_select(void *p, calldata_t *calldata)
@@ -261,7 +361,7 @@ static void item_select(void *p, calldata_t *calldata)
 	UNUSED_PARAMETER(p);
 	auto item = (obs_sceneitem_t *)calldata_ptr(calldata, "item");
 	auto source = obs_sceneitem_get_source(item);
-	for (const auto &it : source_docks) {
+	for (const auto &it : switcher_docks) {
 		if (!it->GetSelected())
 			continue;
 		it->SetSource(source);
@@ -289,7 +389,7 @@ void update_selected_source()
 	obs_scene_enum_items(scene, get_selected_source, &selected_source);
 	if (!selected_source)
 		return;
-	for (const auto &it : source_docks) {
+	for (const auto &it : switcher_docks) {
 		if (!it->GetSelected())
 			continue;
 		it->SetSource(selected_source);
@@ -315,7 +415,7 @@ void update_active(void *param)
 {
 	UNUSED_PARAMETER(param);
 	std::map<obs_source_t *, int> source_active;
-	for (const auto &it : source_docks) {
+	for (const auto &it : switcher_docks) {
 		if (it->ShowActiveEnabled())
 			source_active[it->GetSource()] = ACTIVE_NONE;
 	}
@@ -350,63 +450,51 @@ void update_active(void *param)
 		auto dsk = obs_get_output_source(channel);
 		if (!dsk)
 			continue;
-		const char *scene_name = obs_source_get_name(dsk);
 		for (auto &i : source_active) {
-			auto *sn = obs_source_get_name(i.first);
-			if (strcmp(sn, scene_name) == 0) {
+			if (i.first == dsk) {
 				i.second = ACTIVE_DOWNSTREAM_KEYER;
 				break;
 			}
 		}
 		obs_source_enum_active_tree(
 			dsk,
-			[](obs_source_t *parent, obs_source_t *child, void *param) {
-				UNUSED_PARAMETER(parent);
-				auto m = static_cast<std::map<obs_source_t *, int> *>(param);
-				const char *child_name = obs_source_get_name(child);
-				if (!child_name || strlen(child_name) == 0)
-					return;
-				for (auto &i : *m) {
-					auto *sn = obs_source_get_name(i.first);
-					if (strcmp(sn, child_name) == 0) {
-						i.second = ACTIVE_DOWNSTREAM_KEYER;
-						break;
+				[](obs_source_t *parent, obs_source_t *child, void *param) {
+					UNUSED_PARAMETER(parent);
+					auto m = static_cast<std::map<obs_source_t *, int> *>(param);
+					for (auto &i : *m) {
+						if (i.first == child) {
+							i.second = ACTIVE_DOWNSTREAM_KEYER;
+							break;
+						}
 					}
-				}
-			},
+				},
 			&source_active);
 
 		obs_source_release(dsk);
 	}
 	if (auto *program = obs_frontend_get_current_scene()) {
-		const char *scene_name = obs_source_get_name(program);
 		for (auto &i : source_active) {
-			auto *sn = obs_source_get_name(i.first);
-			if (strcmp(sn, scene_name) == 0) {
+			if (i.first == program) {
 				i.second = ACTIVE_PROGRAM;
 				break;
 			}
 		}
 		obs_source_enum_active_tree(
 			program,
-			[](obs_source_t *parent, obs_source_t *child, void *param) {
-				UNUSED_PARAMETER(parent);
-				auto m = static_cast<std::map<obs_source_t *, int> *>(param);
-				const char *child_name = obs_source_get_name(child);
-				if (!child_name || strlen(child_name) == 0)
-					return;
-				for (auto &i : *m) {
-					auto *sn = obs_source_get_name(i.first);
-					if (strcmp(sn, child_name) == 0) {
-						i.second = ACTIVE_PROGRAM;
-						break;
+				[](obs_source_t *parent, obs_source_t *child, void *param) {
+					UNUSED_PARAMETER(parent);
+					auto m = static_cast<std::map<obs_source_t *, int> *>(param);
+					for (auto &i : *m) {
+						if (i.first == child) {
+							i.second = ACTIVE_PROGRAM;
+							break;
+						}
 					}
-				}
-			},
+				},
 			&source_active);
 		obs_source_release(program);
 	}
-	for (const auto &it : source_docks) {
+	for (const auto &it : switcher_docks) {
 		int active = source_active[it->GetSource().Get()];
 		if (active == ACTIVE_PROGRAM) {
 			if (obs_frontend_streaming_active()) {
@@ -432,15 +520,17 @@ static void frontend_event(enum obs_frontend_event event, void *)
 {
 	if (event == OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP || event == OBS_FRONTEND_EVENT_EXIT) {
 		set_previous_scene_empty(nullptr, nullptr);
-		for (const auto &it : source_docks) {
+		for (const auto &it : switcher_docks) {
 			obs_frontend_remove_dock(it->objectName().toUtf8().constData());
 		}
-		source_docks.clear();
-		for (const auto &it : source_windows) {
+		switcher_docks.clear();
+		for (const auto &it : switcher_windows) {
 			it->close();
 			delete (it);
 		}
-		source_windows.clear();
+		switcher_windows.clear();
+		if (switcher_dock)
+			switcher_dock->HandleFrontendEvent(event);
 	} else if (event == OBS_FRONTEND_EVENT_SCENE_CHANGED || event == OBS_FRONTEND_EVENT_PREVIEW_SCENE_CHANGED ||
 		   event == OBS_FRONTEND_EVENT_STUDIO_MODE_DISABLED || event == OBS_FRONTEND_EVENT_STUDIO_MODE_ENABLED) {
 		if (previous_scene) {
@@ -473,6 +563,8 @@ static void frontend_event(enum obs_frontend_event event, void *)
 
 		obs_queue_task(obs_in_task_thread(OBS_TASK_GRAPHICS) ? OBS_TASK_UI : OBS_TASK_GRAPHICS, update_active, nullptr,
 			       false);
+		if (switcher_dock)
+			switcher_dock->HandleFrontendEvent(event);
 	} else if (event == OBS_FRONTEND_EVENT_STREAMING_STARTING || event == OBS_FRONTEND_EVENT_STREAMING_STARTED ||
 		   event == OBS_FRONTEND_EVENT_STREAMING_STOPPING || event == OBS_FRONTEND_EVENT_STREAMING_STOPPED ||
 		   event == OBS_FRONTEND_EVENT_RECORDING_STARTING || event == OBS_FRONTEND_EVENT_RECORDING_STARTED ||
@@ -480,39 +572,58 @@ static void frontend_event(enum obs_frontend_event event, void *)
 		   event == OBS_FRONTEND_EVENT_RECORDING_PAUSED || event == OBS_FRONTEND_EVENT_RECORDING_UNPAUSED) {
 		obs_queue_task(obs_in_task_thread(OBS_TASK_GRAPHICS) ? OBS_TASK_UI : OBS_TASK_GRAPHICS, update_active, nullptr,
 			       false);
+		if (switcher_dock)
+			switcher_dock->HandleFrontendEvent(event);
 	}
+	SwitcherRemoteManager::Instance()->HandleFrontendEvent(event);
 }
 
 static void source_remove(void *data, calldata_t *call_data)
 {
 	UNUSED_PARAMETER(data);
 	obs_source_t *source = static_cast<obs_source_t *>(calldata_ptr(call_data, "source"));
-	for (auto it = source_docks.begin(); it != source_docks.end();) {
+	for (auto it = switcher_docks.begin(); it != switcher_docks.end();) {
 		if ((*it)->GetSource().Get() == source) {
 			obs_frontend_remove_dock((*it)->objectName().toUtf8().constData());
-			it = source_docks.erase(it);
+			it = switcher_docks.erase(it);
 		} else {
 			++it;
 		}
 	}
+	if (switcher_dock)
+		switcher_dock->HandleSourceRemoved(source);
+	SwitcherRemoteManager::Instance()->HandleSourceRemoved(source);
 }
 
 bool obs_module_load()
 {
-	blog(LOG_INFO, "[Source Dock] loaded version %s", PROJECT_VERSION);
+	blog(LOG_INFO, "[Switcher] loaded version %s", PROJECT_VERSION);
 
 	obs_frontend_add_save_callback(frontend_save_load, nullptr);
 	obs_frontend_add_event_callback(frontend_event, nullptr);
 	signal_handler_connect(obs_get_signal_handler(), "source_remove", source_remove, nullptr);
 
-	const auto action = static_cast<QAction *>(obs_frontend_add_tools_menu_qaction(obs_module_text("SourceDock")));
+	auto *remoteManager = SwitcherRemoteManager::Instance();
+	switcher_dock = new SwitcherWorkspaceDock(static_cast<QMainWindow *>(obs_frontend_get_main_window()));
+	if (!obs_frontend_add_custom_qdock(kSwitcherWorkspaceDockId, switcher_dock)) {
+		delete switcher_dock;
+		switcher_dock = nullptr;
+	} else {
+		switcher_dock->setFloating(true);
+		switcher_dock->hide();
+	}
+	remoteManager->SetWorkspace(switcher_dock);
+
+	const auto action = static_cast<QAction *>(obs_frontend_add_tools_menu_qaction(obs_module_text("Switcher")));
 
 	auto cb = [] {
 		obs_frontend_push_ui_translation(obs_module_get_string);
 
-		const auto sdsd = new SourceDockSettingsDialog(static_cast<QMainWindow *>(obs_frontend_get_main_window()));
-		sdsd->show();
-		sdsd->setAttribute(Qt::WA_DeleteOnClose, true);
+		if (switcher_dock) {
+			switcher_dock->show();
+			switcher_dock->raise();
+			switcher_dock->activateWindow();
+		}
 		obs_frontend_pop_ui_translation();
 	};
 
@@ -520,11 +631,48 @@ bool obs_module_load()
 	return true;
 }
 
+void obs_module_post_load(void)
+{
+	switcher_vendor = obs_websocket_register_vendor("Switcher");
+	if (!switcher_vendor)
+		return;
+
+	obs_websocket_vendor_register_request(switcher_vendor, "GetRemoteState", vendor_get_remote_state, nullptr);
+	obs_websocket_vendor_register_request(switcher_vendor, "ListSlots", vendor_list_slots, nullptr);
+	obs_websocket_vendor_register_request(switcher_vendor, "SelectPreviewSlot", vendor_select_preview_slot, nullptr);
+	obs_websocket_vendor_register_request(switcher_vendor, "Cut", vendor_cut, nullptr);
+	obs_websocket_vendor_register_request(switcher_vendor, "Auto", vendor_auto, nullptr);
+	obs_websocket_vendor_register_request(switcher_vendor, "GetSelectedSlotState", vendor_get_selected_slot_state, nullptr);
+	obs_websocket_vendor_register_request(switcher_vendor, "SetSlotVisibility", vendor_set_slot_visibility, nullptr);
+	obs_websocket_vendor_register_request(switcher_vendor, "SetSlotMute", vendor_set_slot_mute, nullptr);
+	obs_websocket_vendor_register_request(switcher_vendor, "RestartRemote", vendor_restart_remote, nullptr);
+}
+
 void obs_module_unload()
 {
 	obs_frontend_remove_save_callback(frontend_save_load, nullptr);
 	obs_frontend_remove_event_callback(frontend_event, nullptr);
 	signal_handler_disconnect(obs_get_signal_handler(), "source_remove", source_remove, nullptr);
+	SwitcherRemoteManager::Instance()->Shutdown();
+	SwitcherRemoteManager::Instance()->SetWorkspace(nullptr);
+	if (switcher_dock) {
+		obs_frontend_remove_dock(kSwitcherWorkspaceDockId);
+		obs_frontend_remove_dock(LegacyWorkspaceDockId().constData());
+		switcher_dock = nullptr;
+	}
+
+	if (switcher_vendor) {
+		obs_websocket_vendor_unregister_request(switcher_vendor, "GetRemoteState");
+		obs_websocket_vendor_unregister_request(switcher_vendor, "ListSlots");
+		obs_websocket_vendor_unregister_request(switcher_vendor, "SelectPreviewSlot");
+		obs_websocket_vendor_unregister_request(switcher_vendor, "Cut");
+		obs_websocket_vendor_unregister_request(switcher_vendor, "Auto");
+		obs_websocket_vendor_unregister_request(switcher_vendor, "GetSelectedSlotState");
+		obs_websocket_vendor_unregister_request(switcher_vendor, "SetSlotVisibility");
+		obs_websocket_vendor_unregister_request(switcher_vendor, "SetSlotMute");
+		obs_websocket_vendor_unregister_request(switcher_vendor, "RestartRemote");
+		switcher_vendor = nullptr;
+	}
 }
 
 MODULE_EXPORT const char *obs_module_description(void)
@@ -534,7 +682,7 @@ MODULE_EXPORT const char *obs_module_description(void)
 
 MODULE_EXPORT const char *obs_module_name(void)
 {
-	return obs_module_text("SourceDock");
+	return obs_module_text("Switcher");
 }
 
 #define LOG_OFFSET_DB 6.0f
@@ -544,7 +692,7 @@ MODULE_EXPORT const char *obs_module_name(void)
 /* equals -log10f(-LOG_RANGE_DB + LOG_OFFSET_DB) */
 #define LOG_RANGE_VAL -2.00860017176191756f
 
-SourceDock::SourceDock(QString name, bool selected_, QWidget *parent)
+SwitcherDock::SwitcherDock(QString name, bool selected_, QWidget *parent)
 	: QSplitter(parent),
 	  eventFilter(BuildEventFilter()),
 	  selected(selected_)
@@ -557,7 +705,7 @@ SourceDock::SourceDock(QString name, bool selected_, QWidget *parent)
 	setChildrenCollapsible(false);
 }
 
-SourceDock::~SourceDock()
+SwitcherDock::~SwitcherDock()
 {
 	DisableFilters();
 	DisableProperties();
@@ -591,9 +739,9 @@ static inline void GetScaleAndCenterPos(int baseCX, int baseCY, int windowCX, in
 	y = windowCY / 2 - newCY / 2;
 }
 
-void SourceDock::DrawPreview(void *data, uint32_t cx, uint32_t cy)
+void SwitcherDock::DrawPreview(void *data, uint32_t cx, uint32_t cy)
 {
-	SourceDock *window = static_cast<SourceDock *>(data);
+	SwitcherDock *window = static_cast<SwitcherDock *>(data);
 
 	if (!window->source)
 		return;
@@ -631,53 +779,53 @@ void SourceDock::DrawPreview(void *data, uint32_t cx, uint32_t cy)
 	gs_viewport_pop();
 }
 
-void SourceDock::OBSVolumeLevel(void *data, const float magnitude[MAX_AUDIO_CHANNELS], const float peak[MAX_AUDIO_CHANNELS],
+void SwitcherDock::OBSVolumeLevel(void *data, const float magnitude[MAX_AUDIO_CHANNELS], const float peak[MAX_AUDIO_CHANNELS],
 				const float inputPeak[MAX_AUDIO_CHANNELS])
 {
-	SourceDock *sourceDock = static_cast<SourceDock *>(data);
-	if (sourceDock->volMeter)
-		sourceDock->volMeter->setLevels(magnitude, peak, inputPeak);
+	SwitcherDock *dockWidget = static_cast<SwitcherDock *>(data);
+	if (dockWidget->volMeter)
+		dockWidget->volMeter->setLevels(magnitude, peak, inputPeak);
 }
 
-void SourceDock::OBSVolume(void *data, calldata_t *call_data)
+void SwitcherDock::OBSVolume(void *data, calldata_t *call_data)
 {
 	obs_source_t *source;
 	calldata_get_ptr(call_data, "source", &source);
 	double volume;
 	calldata_get_float(call_data, "volume", &volume);
-	SourceDock *sourceDock = static_cast<SourceDock *>(data);
-	QMetaObject::invokeMethod(sourceDock, "SetOutputVolume", Qt::QueuedConnection, Q_ARG(double, volume));
+	SwitcherDock *dockWidget = static_cast<SwitcherDock *>(data);
+	QMetaObject::invokeMethod(dockWidget, "SetOutputVolume", Qt::QueuedConnection, Q_ARG(double, volume));
 }
 
-void SourceDock::OBSMute(void *data, calldata_t *call_data)
+void SwitcherDock::OBSMute(void *data, calldata_t *call_data)
 {
 	obs_source_t *source;
 	calldata_get_ptr(call_data, "source", &source);
 	bool muted = calldata_bool(call_data, "muted");
-	SourceDock *sourceDock = static_cast<SourceDock *>(data);
-	QMetaObject::invokeMethod(sourceDock, "SetMute", Qt::QueuedConnection, Q_ARG(bool, muted));
+	SwitcherDock *dockWidget = static_cast<SwitcherDock *>(data);
+	QMetaObject::invokeMethod(dockWidget, "SetMute", Qt::QueuedConnection, Q_ARG(bool, muted));
 }
 
-void SourceDock::OBSActiveChanged(void *data, calldata_t *call_data)
+void SwitcherDock::OBSActiveChanged(void *data, calldata_t *call_data)
 {
 	UNUSED_PARAMETER(call_data);
-	SourceDock *sourceDock = static_cast<SourceDock *>(data);
-	QMetaObject::invokeMethod(sourceDock, "ActiveChanged", Qt::QueuedConnection);
+	SwitcherDock *dockWidget = static_cast<SwitcherDock *>(data);
+	QMetaObject::invokeMethod(dockWidget, "ActiveChanged", Qt::QueuedConnection);
 }
 
-void SourceDock::LockVolumeControl(bool lock)
+void SwitcherDock::LockVolumeControl(bool lock)
 {
 	slider->setEnabled(!lock);
 	mute->setEnabled(!lock);
 }
 
-void SourceDock::MuteVolumeControl(bool mute)
+void SwitcherDock::MuteVolumeControl(bool mute)
 {
 	if (source && obs_source_muted(source) != mute)
 		obs_source_set_muted(source, mute);
 }
 
-void SourceDock::SetOutputVolume(double volume)
+void SwitcherDock::SetOutputVolume(double volume)
 {
 	float db = obs_mul_to_db(volume);
 	float def;
@@ -692,14 +840,18 @@ void SourceDock::SetOutputVolume(double volume)
 	slider->setValue(val);
 }
 
-void SourceDock::SetMute(bool muted)
+void SwitcherDock::SetMute(bool muted)
 {
 	mute->setChecked(muted);
 }
 
-void SourceDock::ActiveChanged()
+void SwitcherDock::ActiveChanged()
 {
 	int active = ACTIVE_NONE;
+	if (!source) {
+		SetActive(active);
+		return;
+	}
 
 	if (auto *preview = obs_frontend_get_current_preview_scene()) {
 		if (source == preview) {
@@ -723,10 +875,7 @@ void SourceDock::ActiveChanged()
 		auto dsk = obs_get_output_source(channel);
 		if (!dsk)
 			continue;
-		const char *scene_name = obs_source_get_name(dsk);
-
-		auto *sn = obs_source_get_name(source);
-		if (strcmp(sn, scene_name) == 0) {
+		if (source == dsk) {
 			active = ACTIVE_DOWNSTREAM_KEYER;
 		}
 		std::pair<obs_source_t *, int> t = std::pair<obs_source_t *, int>(source, active);
@@ -734,13 +883,8 @@ void SourceDock::ActiveChanged()
 			dsk,
 			[](obs_source_t *parent, obs_source_t *child, void *param) {
 				UNUSED_PARAMETER(parent);
-				auto m = (std::pair<obs_source_t *, int> *)param;
-				const char *child_name = obs_source_get_name(child);
-				if (!child_name || strlen(child_name) == 0)
-					return;
-
-				auto *sn = obs_source_get_name(m->first);
-				if (strcmp(sn, child_name) == 0) {
+				auto m = static_cast<std::pair<obs_source_t *, int> *>(param);
+				if (m->first == child) {
 					m->second = ACTIVE_DOWNSTREAM_KEYER;
 				}
 			},
@@ -750,9 +894,7 @@ void SourceDock::ActiveChanged()
 		obs_source_release(dsk);
 	}
 	if (auto *program = obs_frontend_get_current_scene()) {
-		const char *scene_name = obs_source_get_name(program);
-		auto *sn = obs_source_get_name(source);
-		if (strcmp(sn, scene_name) == 0) {
+		if (source == program) {
 			active = ACTIVE_PROGRAM;
 		}
 		std::pair<obs_source_t *, int> t = std::pair<obs_source_t *, int>(source, active);
@@ -760,13 +902,8 @@ void SourceDock::ActiveChanged()
 			program,
 			[](obs_source_t *parent, obs_source_t *child, void *param) {
 				UNUSED_PARAMETER(parent);
-				auto m = (std::pair<obs_source_t *, int> *)param;
-				const char *child_name = obs_source_get_name(child);
-				if (!child_name || strlen(child_name) == 0)
-					return;
-
-				auto *sn = obs_source_get_name(m->first);
-				if (strcmp(sn, child_name) == 0) {
+				auto m = static_cast<std::pair<obs_source_t *, int> *>(param);
+				if (m->first == child) {
 					m->second = ACTIVE_PROGRAM;
 				}
 			},
@@ -792,7 +929,7 @@ void SourceDock::ActiveChanged()
 	SetActive(active);
 }
 
-void SourceDock::SetActive(int active)
+void SwitcherDock::SetActive(int active)
 {
 	if (activeFrame) {
 		if (active == ACTIVE_STREAMING) {
@@ -860,7 +997,7 @@ void SourceDock::SetActive(int active)
 	}
 }
 
-void SourceDock::SliderChanged(int vol)
+void SwitcherDock::SliderChanged(int vol)
 {
 	float def = (float)vol / 10000.0f;
 	float db;
@@ -875,7 +1012,7 @@ void SourceDock::SliderChanged(int vol)
 		obs_source_set_volume(source, mul);
 }
 
-bool SourceDock::GetSourceRelativeXY(int mouseX, int mouseY, int &relX, int &relY)
+bool SwitcherDock::GetSourceRelativeXY(int mouseX, int mouseY, int &relX, int &relY)
 {
 	float pixelRatio = devicePixelRatioF();
 
@@ -921,7 +1058,7 @@ bool SourceDock::GetSourceRelativeXY(int mouseX, int mouseY, int &relX, int &rel
 	return true;
 }
 
-OBSEventFilter *SourceDock::BuildEventFilter()
+OBSEventFilter *SwitcherDock::BuildEventFilter()
 {
 	return new OBSEventFilter([this](QObject *obj, QEvent *event) {
 		UNUSED_PARAMETER(obj);
@@ -1039,7 +1176,7 @@ static bool HandleSceneMouseClickEvent(obs_scene_t *scene, obs_sceneitem_t *item
 	return true;
 }
 
-bool SourceDock::HandleMouseClickEvent(QMouseEvent *event)
+bool SwitcherDock::HandleMouseClickEvent(QMouseEvent *event)
 {
 	const bool mouseUp = event->type() == QEvent::MouseButtonRelease;
 	if (!mouseUp && event->button() == Qt::LeftButton && event->modifiers().testFlag(Qt::ControlModifier)) {
@@ -1080,7 +1217,7 @@ bool SourceDock::HandleMouseClickEvent(QMouseEvent *event)
 	if (source && (mouseUp || insideSource))
 		obs_source_send_mouse_click(source, &mouseEvent, button, mouseUp, clickCount);
 
-	if (switch_scene_enabled && obs_source_is_scene(source)) {
+	if (switch_scene_enabled && source && obs_source_is_scene(source)) {
 		if (mouseUp) {
 			if (obs_frontend_preview_program_mode_active()) {
 				obs_frontend_set_current_preview_scene(source);
@@ -1088,7 +1225,9 @@ bool SourceDock::HandleMouseClickEvent(QMouseEvent *event)
 				obs_frontend_set_current_scene(source);
 			}
 		} else if (clickCount == 2 && obs_frontend_preview_program_mode_active()) {
-			obs_frontend_set_current_scene(source);
+			auto *userConfig = obs_frontend_get_user_config();
+			if (!userConfig || config_get_bool(userConfig, "BasicWindow", "TransitionOnDoubleClick"))
+				obs_frontend_set_current_scene(source);
 		}
 	} else {
 		if (obs_scene_t *scene = obs_scene_from_source(source)) {
@@ -1140,7 +1279,7 @@ static bool HandleSceneMouseMoveEvent(obs_scene_t *scene, obs_sceneitem_t *item,
 	return true;
 }
 
-bool SourceDock::HandleMouseMoveEvent(QMouseEvent *event)
+bool SwitcherDock::HandleMouseMoveEvent(QMouseEvent *event)
 {
 	if (!event)
 		return false;
@@ -1223,7 +1362,7 @@ static bool HandleSceneMouseWheelEvent(obs_scene_t *scene, obs_sceneitem_t *item
 	return true;
 }
 
-bool SourceDock::HandleMouseWheelEvent(QWheelEvent *event)
+bool SwitcherDock::HandleMouseWheelEvent(QWheelEvent *event)
 {
 	if (!source)
 		return true;
@@ -1279,7 +1418,7 @@ bool SourceDock::HandleMouseWheelEvent(QWheelEvent *event)
 	return true;
 }
 
-bool SourceDock::HandleFocusEvent(QFocusEvent *event)
+bool SwitcherDock::HandleFocusEvent(QFocusEvent *event)
 {
 	bool focus = event->type() == QEvent::FocusIn;
 
@@ -1302,7 +1441,7 @@ bool HandleSceneKeyEvent(obs_scene_t *scene, obs_sceneitem_t *item, void *data)
 	return true;
 }
 
-bool SourceDock::HandleKeyEvent(QKeyEvent *event)
+bool SwitcherDock::HandleKeyEvent(QKeyEvent *event)
 {
 	if (!source)
 		return true;
@@ -1328,8 +1467,11 @@ bool SourceDock::HandleKeyEvent(QKeyEvent *event)
 	return true;
 }
 
-void SourceDock::EnablePreview()
+void SwitcherDock::EnablePreview()
 {
+	if (previewShowing)
+		return;
+
 	if (preview) {
 		if (activeLabel && activeLabel->isVisibleTo(this)) {
 			activeLabel->setVisible(false);
@@ -1351,15 +1493,15 @@ void SourceDock::EnablePreview()
 			ActiveChanged();
 		} else if (activeFrame) {
 			int i = indexOf(activeFrame);
-			if (i >= 0) {
+			if (i >= 0)
 				replaceWidget(i, preview);
-			}
 		}
-		preview->setVisible(true);
-		preview->show();
-		obs_display_add_draw_callback(preview->GetDisplay(), DrawPreview, this);
+		previewShowing = true;
 		if (source)
 			obs_source_inc_showing(source);
+		preview->setVisible(true);
+		preview->show();
+		preview->CreateDisplay();
 		return;
 	}
 	preview = new OBSQTDisplay(this);
@@ -1376,9 +1518,9 @@ void SourceDock::EnablePreview()
 	preview->installEventFilter(eventFilter.get());
 
 	auto addDrawCallback = [this]() {
-		obs_display_add_draw_callback(preview->GetDisplay(), DrawPreview, this);
+		if (previewShowing && preview && preview->GetDisplay())
+			obs_display_add_draw_callback(preview->GetDisplay(), DrawPreview, this);
 	};
-	preview->show();
 	connect(preview, &OBSQTDisplay::DisplayCreated, addDrawCallback);
 
 	if (activeLabel && activeLabel->isVisibleTo(this)) {
@@ -1393,30 +1535,41 @@ void SourceDock::EnablePreview()
 	} else {
 		addWidget(preview);
 	}
+	previewShowing = true;
 	if (source)
 		obs_source_inc_showing(source);
+	preview->show();
+	preview->CreateDisplay();
 }
 
-void SourceDock::DisablePreview()
+void SwitcherDock::DisablePreview()
 {
 	if (!preview)
 		return;
-	obs_display_remove_draw_callback(preview->GetDisplay(), DrawPreview, this);
+
+	const bool wasShowing = previewShowing;
+	previewShowing = false;
+
+	if (auto *display = preview->GetDisplay())
+		obs_display_remove_draw_callback(display, DrawPreview, this);
+
 	preview->setVisible(false);
+	preview->DestroyDisplay();
 	if (activeFrame && activeFrame->isVisibleTo(this)) {
 		activeFrame->setVisible(false);
 		EnableShowActive();
 	}
 
-	obs_source_dec_showing(source);
+	if (wasShowing && source)
+		obs_source_dec_showing(source);
 }
 
-bool SourceDock::PreviewEnabled()
+bool SwitcherDock::PreviewEnabled()
 {
-	return preview != nullptr && preview->isVisibleTo(this);
+	return previewShowing;
 }
 
-void SourceDock::EnableVolMeter()
+void SwitcherDock::EnableVolMeter()
 {
 	if (obs_volmeter != nullptr)
 		return;
@@ -1443,7 +1596,7 @@ void SourceDock::EnableVolMeter()
 	addWidget(volMeterWidget);
 }
 
-void SourceDock::DisableVolMeter()
+void SwitcherDock::DisableVolMeter()
 {
 	if (!obs_volmeter)
 		return;
@@ -1463,12 +1616,12 @@ void SourceDock::DisableVolMeter()
 	obs_volmeter = nullptr;
 }
 
-bool SourceDock::VolMeterEnabled()
+bool SwitcherDock::VolMeterEnabled()
 {
 	return obs_volmeter != nullptr;
 }
 
-void SourceDock::UpdateVolControls()
+void SwitcherDock::UpdateVolControls()
 {
 	if (!volControl)
 		return;
@@ -1493,7 +1646,7 @@ void SourceDock::UpdateVolControls()
 	slider->setValue(def * 10000.0f);
 }
 
-void SourceDock::EnableVolControls()
+void SwitcherDock::EnableVolControls()
 {
 	if (volControl != nullptr) {
 		volControl->setVisible(true);
@@ -1516,9 +1669,9 @@ void SourceDock::EnableVolControls()
 	locked->setStyleSheet("background: none");
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
-	connect(locked, &QCheckBox::checkStateChanged, this, &SourceDock::LockVolumeControl, Qt::DirectConnection);
+	connect(locked, &QCheckBox::checkStateChanged, this, &SwitcherDock::LockVolumeControl, Qt::DirectConnection);
 #else
-	connect(locked, &QCheckBox::stateChanged, this, &SourceDock::LockVolumeControl, Qt::DirectConnection);
+	connect(locked, &QCheckBox::stateChanged, this, &SwitcherDock::LockVolumeControl, Qt::DirectConnection);
 #endif
 
 	slider = new SliderIgnoreScroll(Qt::Horizontal);
@@ -1532,9 +1685,9 @@ void SourceDock::EnableVolControls()
 	mute = new MuteCheckBox();
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
-	connect(mute, &QCheckBox::checkStateChanged, this, &SourceDock::MuteVolumeControl, Qt::DirectConnection);
+	connect(mute, &QCheckBox::checkStateChanged, this, &SwitcherDock::MuteVolumeControl, Qt::DirectConnection);
 #else
-	connect(mute, &QCheckBox::stateChanged, this, &SourceDock::MuteVolumeControl, Qt::DirectConnection);
+	connect(mute, &QCheckBox::stateChanged, this, &SwitcherDock::MuteVolumeControl, Qt::DirectConnection);
 #endif
 
 	if (source) {
@@ -1553,7 +1706,7 @@ void SourceDock::EnableVolControls()
 	UpdateVolControls();
 }
 
-void SourceDock::DisableVolControls()
+void SwitcherDock::DisableVolControls()
 {
 	if (!volControl)
 		return;
@@ -1564,12 +1717,12 @@ void SourceDock::DisableVolControls()
 	}
 	volControl->setVisible(false);
 }
-bool SourceDock::VolControlsEnabled()
+bool SwitcherDock::VolControlsEnabled()
 {
 	return volControl != nullptr && volControl->isVisibleTo(this);
 }
 
-void SourceDock::EnableMediaControls()
+void SwitcherDock::EnableMediaControls()
 {
 	if (mediaControl != nullptr) {
 		mediaControl->SetSource(OBSGetWeakRef(source));
@@ -1581,7 +1734,7 @@ void SourceDock::EnableMediaControls()
 	addWidget(mediaControl);
 }
 
-void SourceDock::DisableMediaControls()
+void SwitcherDock::DisableMediaControls()
 {
 	if (!mediaControl)
 		return;
@@ -1591,29 +1744,29 @@ void SourceDock::DisableMediaControls()
 	mediaControl->setVisible(false);
 }
 
-bool SourceDock::MediaControlsEnabled()
+bool SwitcherDock::MediaControlsEnabled()
 {
 	return mediaControl != nullptr && mediaControl->isVisibleTo(this);
 }
 
-void SourceDock::EnableSwitchScene()
+void SwitcherDock::EnableSwitchScene()
 {
-	if (!obs_source_is_scene(source))
+	if (!source || !obs_source_is_scene(source))
 		return;
 	switch_scene_enabled = true;
 }
 
-void SourceDock::DisableSwitchScene()
+void SwitcherDock::DisableSwitchScene()
 {
 	switch_scene_enabled = false;
 }
 
-bool SourceDock::SwitchSceneEnabled()
+bool SwitcherDock::SwitchSceneEnabled()
 {
 	return switch_scene_enabled;
 }
 
-void SourceDock::EnableShowActive()
+void SwitcherDock::EnableShowActive()
 {
 	if (preview && preview->isVisibleTo(this)) {
 		if (activeFrame) {
@@ -1621,6 +1774,8 @@ void SourceDock::EnableShowActive()
 			activeFrame->setVisible(true);
 			activeFrame->layout()->addWidget(preview);
 			ActiveChanged();
+			if (!source)
+				return;
 			return;
 		}
 		activeFrame = new QFrame;
@@ -1630,6 +1785,8 @@ void SourceDock::EnableShowActive()
 		replaceWidget(indexOf(preview), activeFrame);
 		l->addWidget(preview);
 		ActiveChanged();
+		if (!source)
+			return;
 		signal_handler_t *sh = obs_source_get_signal_handler(source);
 		if (sh) {
 			signal_handler_disconnect(sh, "activate", OBSActiveChanged, this);
@@ -1641,6 +1798,8 @@ void SourceDock::EnableShowActive()
 	}
 	if (activeLabel) {
 		activeLabel->setVisible(true);
+		if (!source)
+			return;
 		signal_handler_t *sh = obs_source_get_signal_handler(source);
 		if (sh) {
 			signal_handler_disconnect(sh, "activate", OBSActiveChanged, this);
@@ -1656,6 +1815,8 @@ void SourceDock::EnableShowActive()
 	activeLabel->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
 	ActiveChanged();
 	addWidget(activeLabel);
+	if (!source)
+		return;
 	signal_handler_t *sh = obs_source_get_signal_handler(source);
 	if (sh) {
 		signal_handler_disconnect(sh, "activate", OBSActiveChanged, this);
@@ -1665,12 +1826,14 @@ void SourceDock::EnableShowActive()
 	}
 }
 
-void SourceDock::DisableShowActive()
+void SwitcherDock::DisableShowActive()
 {
-	signal_handler_t *sh = obs_source_get_signal_handler(source);
-	if (sh) {
-		signal_handler_disconnect(sh, "activate", OBSActiveChanged, this);
-		signal_handler_disconnect(sh, "deactivate", OBSActiveChanged, this);
+	if (source) {
+		signal_handler_t *sh = obs_source_get_signal_handler(source);
+		if (sh) {
+			signal_handler_disconnect(sh, "activate", OBSActiveChanged, this);
+			signal_handler_disconnect(sh, "deactivate", OBSActiveChanged, this);
+		}
 	}
 	if (activeLabel) {
 		activeLabel->setVisible(false);
@@ -1682,14 +1845,16 @@ void SourceDock::DisableShowActive()
 		activeFrame->setVisible(false);
 	}
 }
-bool SourceDock::ShowActiveEnabled()
+bool SwitcherDock::ShowActiveEnabled()
 {
 	return (activeLabel != nullptr && activeLabel->isVisibleTo(this)) ||
 	       (activeFrame != nullptr && activeFrame->isVisibleTo(this));
 }
 
-void SourceDock::EnableSceneItems()
+void SwitcherDock::EnableSceneItems()
 {
+	if (!source)
+		return;
 	obs_scene_t *scene = obs_scene_from_source(source);
 	if (!scene)
 		scene = obs_group_from_source(source);
@@ -1728,7 +1893,7 @@ void SourceDock::EnableSceneItems()
 	obs_scene_enum_items(scene, AddSceneItem, sceneItems->layout());
 
 	auto itemVisible = [](void *data, calldata_t *cd) {
-		const auto dock = static_cast<SourceDock *>(data);
+		const auto dock = static_cast<SwitcherDock *>(data);
 		const auto curItem = static_cast<obs_sceneitem_t *>(calldata_ptr(cd, "item"));
 
 		const int id = (int)obs_sceneitem_get_id(curItem);
@@ -1737,7 +1902,7 @@ void SourceDock::EnableSceneItems()
 
 	auto refreshItems = [](void *data, calldata_t *cd) {
 		UNUSED_PARAMETER(cd);
-		const auto dock = static_cast<SourceDock *>(data);
+		const auto dock = static_cast<SwitcherDock *>(data);
 		QMetaObject::invokeMethod(dock, "RefreshItems", Qt::QueuedConnection);
 	};
 
@@ -1750,7 +1915,7 @@ void SourceDock::EnableSceneItems()
 	visibleSignal.Connect(signal, "item_visible", itemVisible, this);
 }
 
-void SourceDock::VisibilityChanged(int id)
+void SwitcherDock::VisibilityChanged(int id)
 {
 	auto layout = dynamic_cast<QGridLayout *>(sceneItems->layout());
 	auto count = layout->rowCount();
@@ -1774,13 +1939,13 @@ void SourceDock::VisibilityChanged(int id)
 	}
 }
 
-void SourceDock::RefreshItems()
+void SwitcherDock::RefreshItems()
 {
 	DisableSceneItems();
 	EnableSceneItems();
 }
 
-bool SourceDock::GetSceneItemCount(obs_scene_t *scene, obs_sceneitem_t *item, void *data)
+bool SwitcherDock::GetSceneItemCount(obs_scene_t *scene, obs_sceneitem_t *item, void *data)
 {
 	UNUSED_PARAMETER(scene);
 	int *count = (int *)data;
@@ -1790,7 +1955,7 @@ bool SourceDock::GetSceneItemCount(obs_scene_t *scene, obs_sceneitem_t *item, vo
 	return true;
 }
 
-bool SourceDock::AddSceneItem(obs_scene_t *scene, obs_sceneitem_t *item, void *data)
+bool SwitcherDock::AddSceneItem(obs_scene_t *scene, obs_sceneitem_t *item, void *data)
 {
 	UNUSED_PARAMETER(scene);
 	QGridLayout *layout = static_cast<QGridLayout *>(data);
@@ -1856,7 +2021,7 @@ bool SourceDock::AddSceneItem(obs_scene_t *scene, obs_sceneitem_t *item, void *d
 	return true;
 }
 
-void SourceDock::DisableSceneItems()
+void SwitcherDock::DisableSceneItems()
 {
 	if (!sceneItems)
 		return;
@@ -1875,12 +2040,12 @@ void SourceDock::DisableSceneItems()
 	reorderSignal.Disconnect();
 	refreshSignal.Disconnect();
 }
-bool SourceDock::SceneItemsEnabled()
+bool SwitcherDock::SceneItemsEnabled()
 {
 	return sceneItems != nullptr && sceneItems->isVisibleTo(this);
 }
 
-void SourceDock::EnableProperties()
+void SwitcherDock::EnableProperties()
 {
 	if (propertiesButton) {
 		propertiesButton->setVisible(true);
@@ -1892,24 +2057,26 @@ void SourceDock::EnableProperties()
 	propertiesButton->setText(QT_UTF8(obs_module_text("Properties")));
 	addWidget(propertiesButton);
 	auto openProps = [this]() {
+		if (!source)
+			return;
 		obs_frontend_open_source_properties(source);
 	};
 	connect(propertiesButton, &QAbstractButton::clicked, openProps);
 }
 
-void SourceDock::DisableProperties()
+void SwitcherDock::DisableProperties()
 {
 	if (!propertiesButton)
 		return;
 	propertiesButton->setVisible(false);
 }
 
-bool SourceDock::PropertiesEnabled()
+bool SwitcherDock::PropertiesEnabled()
 {
 	return propertiesButton != nullptr && propertiesButton->isVisible();
 }
 
-void SourceDock::EnableFilters()
+void SwitcherDock::EnableFilters()
 {
 	if (filtersButton) {
 		filtersButton->setVisible(true);
@@ -1920,19 +2087,21 @@ void SourceDock::EnableFilters()
 	filtersButton->setText(QT_UTF8(obs_module_text("Filters")));
 	addWidget(filtersButton);
 	auto openProps = [this]() {
+		if (!source)
+			return;
 		obs_frontend_open_source_filters(source);
 	};
 	connect(filtersButton, &QAbstractButton::clicked, openProps);
 }
 
-void SourceDock::DisableFilters()
+void SwitcherDock::DisableFilters()
 {
 	if (!filtersButton)
 		return;
 	filtersButton->setVisible(false);
 }
 
-bool SourceDock::FiltersEnabled()
+bool SwitcherDock::FiltersEnabled()
 {
 	return filtersButton != nullptr && filtersButton->isVisibleTo(this);
 }
@@ -1951,7 +2120,7 @@ static inline long long color_to_int(QColor color)
 	return shift(color.red(), 0) | shift(color.green(), 8) | shift(color.blue(), 16) | shift(color.alpha(), 24);
 }
 
-void SourceDock::EnableTextInput()
+void SwitcherDock::EnableTextInput()
 {
 	if (textInput) {
 		textInput->setVisible(true);
@@ -2089,7 +2258,7 @@ void SourceDock::EnableTextInput()
 	textInputTimer->start(1000);
 }
 
-void SourceDock::DisableTextInput()
+void SwitcherDock::DisableTextInput()
 {
 	if (!textInput)
 		return;
@@ -2099,17 +2268,17 @@ void SourceDock::DisableTextInput()
 	textInput = nullptr;
 }
 
-bool SourceDock::TextInputEnabled()
+bool SwitcherDock::TextInputEnabled()
 {
 	return textInput != nullptr && textInput->isVisibleTo(this);
 }
 
-obs_data_t *SourceDock::GetCustomTextInputStyle()
+obs_data_t *SwitcherDock::GetCustomTextInputStyle()
 {
 	return textInputCustomStyle;
 }
 
-void SourceDock::SetCustomTextInputStyle(obs_data_t *ns)
+void SwitcherDock::SetCustomTextInputStyle(obs_data_t *ns)
 {
 	obs_data_release(textInputCustomStyle);
 	obs_data_addref(ns);
@@ -2117,7 +2286,7 @@ void SourceDock::SetCustomTextInputStyle(obs_data_t *ns)
 	ApplyCustomTextInputStyle();
 }
 
-void SourceDock::ApplyCustomTextInputStyle()
+void SwitcherDock::ApplyCustomTextInputStyle()
 {
 	if (!textInput)
 		return;
@@ -2154,11 +2323,11 @@ void SourceDock::ApplyCustomTextInputStyle()
 	textInput->setStyleSheet(style);
 }
 
-void SourceDock::SetSource(const OBSSource source_)
+void SwitcherDock::SetSource(const OBSSource source_)
 {
 	if (source_ == source)
 		return;
-	if (preview && preview->isVisibleTo(this) && source)
+	if (previewShowing && source)
 		obs_source_dec_showing(source);
 
 	if (obs_volmeter)
@@ -2168,6 +2337,11 @@ void SourceDock::SetSource(const OBSSource source_)
 		auto sh = obs_source_get_signal_handler(source);
 		signal_handler_disconnect(sh, "mute", OBSMute, this);
 		signal_handler_disconnect(sh, "volume", OBSVolume, this);
+	}
+	if (ShowActiveEnabled() && source) {
+		auto sh = obs_source_get_signal_handler(source);
+		signal_handler_disconnect(sh, "activate", OBSActiveChanged, this);
+		signal_handler_disconnect(sh, "deactivate", OBSActiveChanged, this);
 	}
 
 	source = source_;
@@ -2200,51 +2374,60 @@ void SourceDock::SetSource(const OBSSource source_)
 		signal_handler_connect(sh, "mute", OBSMute, this);
 		signal_handler_connect(sh, "volume", OBSVolume, this);
 	}
+	if (ShowActiveEnabled()) {
+		auto sh = obs_source_get_signal_handler(source);
+		if (sh) {
+			signal_handler_disconnect(sh, "activate", OBSActiveChanged, this);
+			signal_handler_disconnect(sh, "deactivate", OBSActiveChanged, this);
+			signal_handler_connect(sh, "activate", OBSActiveChanged, this);
+			signal_handler_connect(sh, "deactivate", OBSActiveChanged, this);
+		}
+	}
 
 	if (obs_volmeter)
 		obs_volmeter_attach_source(obs_volmeter, source);
 
-	if (preview && preview->isVisibleTo(this))
+	if (previewShowing)
 		obs_source_inc_showing(source);
 }
 
-OBSSource SourceDock::GetSource()
+OBSSource SwitcherDock::GetSource()
 {
 	return source;
 }
 
-void SourceDock::setAction(QAction *a)
+void SwitcherDock::setAction(QAction *a)
 {
 	action = a;
 }
 
-void SourceDock::SetZoom(float zoom)
+void SwitcherDock::SetZoom(float zoom)
 {
 	if (zoom < 1.0f)
 		return;
 	this->zoom = zoom;
 }
 
-void SourceDock::SetScrollX(float scroll)
+void SwitcherDock::SetScrollX(float scroll)
 {
 	if (scroll < 0.0f || scroll > 1.0f)
 		return;
 	scrollX = scroll;
 }
 
-void SourceDock::SetScrollY(float scroll)
+void SwitcherDock::SetScrollY(float scroll)
 {
 	if (scroll < 0.0f || scroll > 1.0f)
 		return;
 	scrollY = scroll;
 }
 
-QByteArray SourceDock::saveSplitState()
+QByteArray SwitcherDock::saveSplitState()
 {
 	return saveState();
 }
 
-bool SourceDock::restoreSplitState(const QByteArray &splitState)
+bool SwitcherDock::restoreSplitState(const QByteArray &splitState)
 {
 	return restoreState(splitState);
 }
