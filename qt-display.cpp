@@ -1,5 +1,6 @@
 #include "qt-display.hpp"
 #include "display-helpers.hpp"
+#include <QPlatformSurfaceEvent>
 #include <QWindow>
 #include <QScreen>
 #include <QResizeEvent>
@@ -12,12 +13,16 @@
 #include <Windows.h>
 #endif
 
-#ifdef ENABLE_WAYLAND
+#if !defined(_WIN32) && !defined(__APPLE__)
 #include <obs-nix-platform.h>
+#endif
+
+#ifdef ENABLE_WAYLAND
 #if QT_VERSION < QT_VERSION_CHECK(6, 9, 0)
 #include <qpa/qplatformnativeinterface.h>
 #endif
 #include <QGuiApplication>
+#endif
 
 class SurfaceEventFilter : public QObject {
 	OBSQTDisplay *display;
@@ -74,8 +79,6 @@ private:
 	}
 };
 
-#endif
-
 static inline long long color_to_int(const QColor &color)
 {
 	auto shift = [&](unsigned val, int shift) {
@@ -125,10 +128,7 @@ OBSQTDisplay::OBSQTDisplay(QWidget *parent, Qt::WindowFlags flags) : QWidget(par
 	connect(windowHandle(), &QWindow::visibleChanged, windowVisible);
 	connect(windowHandle(), &QWindow::screenChanged, screenChanged);
 
-#ifdef ENABLE_WAYLAND
-	if (obs_get_nix_platform() == OBS_NIX_PLATFORM_WAYLAND)
-		windowHandle()->installEventFilter(new SurfaceEventFilter(this));
-#endif
+	windowHandle()->installEventFilter(new SurfaceEventFilter(this));
 }
 
 QColor OBSQTDisplay::GetDisplayBackgroundColor() const

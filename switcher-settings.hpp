@@ -10,7 +10,7 @@
 
 #include "obs.h"
 
-class SourceDockSettingsDialog : public QDialog {
+class SwitcherSettingsDialog : public QDialog {
 	Q_OBJECT
 	QGridLayout *mainLayout;
 	QComboBox *sourceCombo;
@@ -37,8 +37,8 @@ class SourceDockSettingsDialog : public QDialog {
 	void SelectAllChanged();
 
 public:
-	SourceDockSettingsDialog(QMainWindow *parent = nullptr);
-	~SourceDockSettingsDialog();
+	SwitcherSettingsDialog(QMainWindow *parent = nullptr);
+	~SwitcherSettingsDialog();
 public slots:
 	void RefreshTable();
 
