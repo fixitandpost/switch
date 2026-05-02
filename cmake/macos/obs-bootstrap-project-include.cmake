@@ -1,0 +1,7 @@
+if(APPLE AND NOT CMAKE_Swift_COMPILER_LOADED)
+  include(CheckLanguage)
+  check_language(Swift)
+  if(CMAKE_Swift_COMPILER)
+    enable_language(Swift)
+  endif()
+endif()

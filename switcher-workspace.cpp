@@ -2,36 +2,49 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
+#include <QApplication>
+#include <QAbstractItemView>
+#include <QAction>
 #include <QComboBox>
 #include <QCheckBox>
 #include <QClipboard>
-#include <QDialog>
+#include <QContextMenuEvent>
+#include <QKeyEvent>
 #include <QFormLayout>
 #include <QGuiApplication>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMainWindow>
+#include <QMenu>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScreen>
+#include <QScopedValueRollback>
+#include <QPalette>
 #include <QShowEvent>
 #include <QHideEvent>
 #include <QSignalBlocker>
+#include <QSplitter>
 #include <QStackedWidget>
 #include <QStyle>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QWindow>
 
 #include <obs-module.h>
 
 #include "switcher-settings.hpp"
 #include "switcher-remote-manager.hpp"
+#include "util/config-file.h"
 
 #ifndef QT_UTF8
 #define QT_UTF8(str) QString::fromUtf8(str)
@@ -43,7 +56,7 @@
 namespace {
 constexpr int kMaxSwitcherSlots = 25;
 constexpr auto kRemoteStateKey = "remote";
-constexpr int kChromeMargin = 18;
+SwitcherWorkspaceDock *gWorkspaceDock = nullptr;
 
 int NormalizeVisibleSlotCount(int slotCount)
 {
@@ -58,52 +71,348 @@ int NormalizeVisibleSlotCount(int slotCount)
 	}
 }
 
-int NextDetachedDockId()
+QColor WithAlpha(QColor color, int alpha)
 {
-	static int nextId = 0;
-	return ++nextId;
+	color.setAlpha(std::clamp(alpha, 0, 255));
+	return color;
+}
+
+QColor Blend(const QColor &first, const QColor &second, qreal ratio)
+{
+	ratio = std::clamp(ratio, 0.0, 1.0);
+	const auto inverse = 1.0 - ratio;
+	return QColor::fromRgbF(first.redF() * inverse + second.redF() * ratio,
+				 first.greenF() * inverse + second.greenF() * ratio,
+				 first.blueF() * inverse + second.blueF() * ratio,
+				 first.alphaF() * inverse + second.alphaF() * ratio);
+}
+
+QString CssColor(const QColor &color)
+{
+	return QString("rgba(%1, %2, %3, %4)")
+		.arg(color.red())
+		.arg(color.green())
+		.arg(color.blue())
+		.arg(color.alpha());
+}
+
+obs_source_t *ResolveStoredSource(obs_data_t *data)
+{
+	if (!data)
+		return nullptr;
+
+	const char *sourceUuid = obs_data_get_string(data, "source_uuid");
+	if (sourceUuid && strlen(sourceUuid) > 0) {
+		if (auto *source = obs_get_source_by_uuid(sourceUuid))
+			return source;
+	}
+
+	const char *sourceName = obs_data_get_string(data, "source_name");
+	if (sourceName && strlen(sourceName) > 0)
+		return obs_get_source_by_name(sourceName);
+
+	return nullptr;
+}
+
+void ApplyWorkspaceUndoState(const char *json)
+{
+	if (!gWorkspaceDock || !json || !strlen(json))
+		return;
+
+	gWorkspaceDock->ApplySerializedContentState(json);
+}
+
+void GetScaleAndCenterPos(int baseCX, int baseCY, int windowCX, int windowCY, int &x, int &y, float &scale)
+{
+	int newCX = 0;
+	int newCY = 0;
+
+	const double windowAspect = double(windowCX) / double(windowCY);
+	const double baseAspect = double(baseCX) / double(baseCY);
+
+	if (windowAspect > baseAspect) {
+		scale = float(windowCY) / float(baseCY);
+		newCX = int(double(windowCY) * baseAspect);
+		newCY = windowCY;
+	} else {
+		scale = float(windowCX) / float(baseCX);
+		newCX = windowCX;
+		newCY = int(float(windowCX) / baseAspect);
+	}
+
+	x = windowCX / 2 - newCX / 2;
+	y = windowCY / 2 - newCY / 2;
 }
 } // namespace
 
+SwitcherWorkspacePreview::SwitcherWorkspacePreview(QWidget *parent) : QWidget(parent)
+{
+	auto *layout = new QVBoxLayout(this);
+	layout->setContentsMargins(0, 0, 0, 0);
+	layout->setSpacing(0);
+}
+
+SwitcherWorkspacePreview::~SwitcherWorkspacePreview()
+{
+	DeactivatePreview();
+}
+
+void SwitcherWorkspacePreview::DrawPreview(void *data, uint32_t cx, uint32_t cy)
+{
+	auto *preview = static_cast<SwitcherWorkspacePreview *>(data);
+	if (!preview || !preview->source)
+		return;
+
+	uint32_t sourceCX = obs_source_get_width(preview->source);
+	if (sourceCX <= 0)
+		sourceCX = 1;
+	uint32_t sourceCY = obs_source_get_height(preview->source);
+	if (sourceCY <= 0)
+		sourceCY = 1;
+
+	int x = 0;
+	int y = 0;
+	float scale = 1.0f;
+	GetScaleAndCenterPos(sourceCX, sourceCY, cx, cy, x, y, scale);
+
+	gs_viewport_push();
+	gs_projection_push();
+	const bool previous = gs_set_linear_srgb(true);
+
+	gs_ortho(0.0f, float(sourceCX), 0.0f, float(sourceCY), -100.0f, 100.0f);
+	gs_set_viewport(x, y, int(scale * float(sourceCX)), int(scale * float(sourceCY)));
+	obs_source_video_render(preview->source);
+
+	gs_set_linear_srgb(previous);
+	gs_projection_pop();
+	gs_viewport_pop();
+}
+
+void SwitcherWorkspacePreview::SetSource(const OBSSource &source_)
+{
+	if (source == source_)
+		return;
+
+	if (previewActive && source)
+		obs_source_dec_showing(source);
+
+	source = source_;
+	const QCursor cursor = source && obs_source_is_scene(source) ? QCursor(Qt::PointingHandCursor) : QCursor(Qt::ArrowCursor);
+	setCursor(cursor);
+	if (display)
+		display->setCursor(cursor);
+
+	if (previewActive && source)
+		obs_source_inc_showing(source);
+
+	UpdatePreviewLifecycle();
+}
+
+OBSSource SwitcherWorkspacePreview::GetSource() const
+{
+	return source;
+}
+
+void SwitcherWorkspacePreview::SetPreviewActive(bool active)
+{
+	if (previewConfigured == active)
+		return;
+
+	previewConfigured = active;
+	UpdatePreviewLifecycle();
+}
+
+void SwitcherWorkspacePreview::RefreshActiveState()
+{
+}
+
+void SwitcherWorkspacePreview::changeEvent(QEvent *event)
+{
+	QWidget::changeEvent(event);
+
+	if (event && event->type() == QEvent::WindowStateChange)
+		UpdatePreviewLifecycle();
+}
+
+void SwitcherWorkspacePreview::showEvent(QShowEvent *event)
+{
+	QWidget::showEvent(event);
+	UpdatePreviewLifecycle();
+}
+
+void SwitcherWorkspacePreview::hideEvent(QHideEvent *event)
+{
+	DeactivatePreview();
+	QWidget::hideEvent(event);
+}
+
+bool SwitcherWorkspacePreview::eventFilter(QObject *watched, QEvent *event)
+{
+	if (watched != display || !event)
+		return QWidget::eventFilter(watched, event);
+
+	switch (event->type()) {
+	case QEvent::ContextMenu:
+		return HandleContextMenuEvent(static_cast<QContextMenuEvent *>(event));
+	case QEvent::MouseButtonRelease:
+	case QEvent::MouseButtonDblClick:
+		return HandleMouseButtonEvent(static_cast<QMouseEvent *>(event));
+	default:
+		return QWidget::eventFilter(watched, event);
+	}
+}
+
+bool SwitcherWorkspacePreview::HandleMouseButtonEvent(QMouseEvent *event)
+{
+	if (!event)
+		return false;
+
+#ifdef __APPLE__
+	const bool controlClickContext =
+		event->button() == Qt::LeftButton && event->modifiers().testFlag(Qt::ControlModifier);
+#else
+	const bool controlClickContext = false;
+#endif
+
+	if (event->button() == Qt::RightButton || controlClickContext)
+		return true;
+
+	if (!source || !obs_source_is_scene(source) || event->button() != Qt::LeftButton)
+		return false;
+
+	if (event->type() == QEvent::MouseButtonDblClick && obs_frontend_preview_program_mode_active()) {
+		auto *userConfig = obs_frontend_get_user_config();
+		if (!userConfig || config_get_bool(userConfig, "BasicWindow", "TransitionOnDoubleClick"))
+			obs_frontend_set_current_scene(source);
+		return true;
+	}
+
+	if (event->type() != QEvent::MouseButtonRelease)
+		return false;
+
+	if (obs_frontend_preview_program_mode_active())
+		obs_frontend_set_current_preview_scene(source);
+	else
+		obs_frontend_set_current_scene(source);
+
+	return true;
+}
+
+bool SwitcherWorkspacePreview::HandleContextMenuEvent(QContextMenuEvent *event)
+{
+	if (!event)
+		return false;
+
+	emit ContextMenuRequested(event->globalPos());
+	return true;
+}
+
+bool SwitcherWorkspacePreview::ShouldActivatePreview() const
+{
+	if (!previewConfigured || !source || !isVisible())
+		return false;
+
+	if (auto *topLevel = window(); topLevel && topLevel->isMinimized())
+		return false;
+
+	return true;
+}
+
+void SwitcherWorkspacePreview::ActivatePreview()
+{
+	if (previewActive || !source)
+		return;
+
+	if (!display) {
+		display = new OBSQTDisplay(this);
+		display->setObjectName(QStringLiteral("switcherWorkspacePreview"));
+		display->setMinimumSize(QSize(24, 24));
+		display->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+		display->setMouseTracking(true);
+		display->setFocusPolicy(Qt::NoFocus);
+		display->installEventFilter(this);
+		display->hide();
+		layout()->addWidget(display);
+
+		connect(display, &OBSQTDisplay::DisplayCreated, this, [this]() {
+			if (previewActive && display && display->GetDisplay())
+				obs_display_add_draw_callback(display->GetDisplay(), DrawPreview, this);
+		});
+	}
+
+	display->setCursor(source && obs_source_is_scene(source) ? Qt::PointingHandCursor : Qt::ArrowCursor);
+	previewActive = true;
+	obs_source_inc_showing(source);
+	display->show();
+	display->CreateDisplay();
+}
+
+void SwitcherWorkspacePreview::DeactivatePreview()
+{
+	if (!display)
+		return;
+
+	const bool wasActive = previewActive;
+	previewActive = false;
+
+	if (auto *obsDisplay = display->GetDisplay())
+		obs_display_remove_draw_callback(obsDisplay, DrawPreview, this);
+
+	display->hide();
+	display->DestroyDisplay();
+	if (wasActive && source)
+		obs_source_dec_showing(source);
+}
+
+void SwitcherWorkspacePreview::UpdatePreviewLifecycle()
+{
+	if (ShouldActivatePreview())
+		ActivatePreview();
+	else
+		DeactivatePreview();
+}
+
 SwitcherWorkspaceSlot::SwitcherWorkspaceSlot(int slotIndex_, QWidget *parent)
 	: QFrame(parent),
-	  slotIndex(slotIndex_),
-	  dock(new SwitcherDock(QStringLiteral("switcher-workspace-slot-%1").arg(slotIndex_ + 1), false, this)),
-	  titleLabel(new QLabel(this)),
-	  contentStack(new QStackedWidget(this)),
-	  emptyLabel(new QLabel(QT_UTF8(obs_module_text("SwitcherEmptySlot")), this)),
-	  selectionButton(new QPushButton(this))
+		  slotIndex(slotIndex_),
+		  previewWidget(new SwitcherWorkspacePreview(this)),
+		  contentStack(new QStackedWidget(this)),
+		  emptyLabel(new QLabel(this)),
+		  titleLabel(new QLabel(this)),
+	  contextMenu(new QMenu(this))
 {
 	setObjectName(QStringLiteral("switcherWorkspaceSlot"));
 	setAttribute(Qt::WA_Hover, true);
+	setContextMenuPolicy(Qt::DefaultContextMenu);
 	setMinimumSize(180, 120);
 
 	auto *layout = new QVBoxLayout(this);
-	layout->setContentsMargins(10, 10, 10, 10);
-	layout->setSpacing(10);
-
-	titleLabel->setAlignment(Qt::AlignCenter);
-	titleLabel->setWordWrap(true);
-	titleLabel->setObjectName(QStringLiteral("switcherWorkspaceSlotTitle"));
+	layout->setContentsMargins(0, 0, 0, 0);
+	layout->setSpacing(0);
 
 	emptyLabel->setAlignment(Qt::AlignCenter);
 	emptyLabel->setWordWrap(true);
+	emptyLabel->setMargin(28);
 	emptyLabel->setObjectName(QStringLiteral("switcherWorkspaceSlotEmpty"));
-
-	dock->setHandleWidth(0);
+	emptyLabel->setText(QStringLiteral("%1\n%2")
+				    .arg(QT_UTF8(obs_module_text("SwitcherEmptySlot")),
+					 QT_UTF8(obs_module_text("SwitcherEmptySlotHint"))));
 
 	contentStack->addWidget(emptyLabel);
-	contentStack->addWidget(dock);
+	contentStack->addWidget(previewWidget);
 
-	layout->addWidget(titleLabel);
 	layout->addWidget(contentStack, 1);
 
-	selectionButton->setObjectName(QStringLiteral("switcherWorkspaceSlotHitTarget"));
-	selectionButton->setCursor(Qt::PointingHandCursor);
-	selectionButton->setFlat(true);
-	selectionButton->setFocusPolicy(Qt::NoFocus);
-	selectionButton->setToolTip(GetEffectiveTitle());
-	connect(selectionButton, &QPushButton::clicked, this, [this] { emit Clicked(slotIndex); });
+	titleLabel->setObjectName(QStringLiteral("switcherWorkspaceSlotTitle"));
+	titleLabel->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+
+	auto *editAction = contextMenu->addAction(QT_UTF8(obs_module_text("SwitcherEditView")));
+	auto *detachAction = contextMenu->addAction(QT_UTF8(obs_module_text("OpenDetachedView")));
+	auto *advancedAction = contextMenu->addAction(QT_UTF8(obs_module_text("SwitcherAdvancedSettings")));
+	connect(editAction, &QAction::triggered, this, [this] { emit ConfigureRequested(slotIndex); });
+	connect(detachAction, &QAction::triggered, this, [this] { emit DetachRequested(slotIndex); });
+	connect(advancedAction, &QAction::triggered, this, [this] { emit AdvancedRequested(slotIndex); });
+	connect(previewWidget, &SwitcherWorkspacePreview::ContextMenuRequested, this, &SwitcherWorkspaceSlot::ShowContextMenu);
 
 	RefreshPresentation();
 	RefreshSelectionState();
@@ -111,24 +420,15 @@ SwitcherWorkspaceSlot::SwitcherWorkspaceSlot(int slotIndex_, QWidget *parent)
 
 void SwitcherWorkspaceSlot::SetSource(const OBSSource &source)
 {
-	dock->SetSource(source);
-	if (source) {
-		dock->EnableShowActive();
-		dock->EnableSwitchScene();
-		if (previewActive)
-			dock->EnablePreview();
-	} else {
-		dock->DisableSwitchScene();
-		dock->DisablePreview();
-		dock->DisableShowActive();
-	}
+	previewWidget->SetSource(source);
+	previewWidget->SetPreviewActive(previewActive && source);
 	RefreshPresentation();
 	RefreshActiveState();
 }
 
 OBSSource SwitcherWorkspaceSlot::GetSource()
 {
-	return dock->GetSource();
+	return previewWidget->GetSource();
 }
 
 void SwitcherWorkspaceSlot::SetCustomTitle(const QString &title)
@@ -146,7 +446,7 @@ QString SwitcherWorkspaceSlot::GetEffectiveTitle() const
 {
 	if (!customTitle.isEmpty())
 		return customTitle;
-	if (auto source = dock->GetSource())
+	if (auto source = previewWidget->GetSource())
 		return QT_UTF8(obs_source_get_name(source));
 	return DefaultTitle();
 }
@@ -157,15 +457,7 @@ void SwitcherWorkspaceSlot::SetPreviewActive(bool active)
 		return;
 
 	previewActive = active;
-	if (!dock->GetSource()) {
-		dock->DisablePreview();
-		return;
-	}
-
-	if (previewActive)
-		dock->EnablePreview();
-	else
-		dock->DisablePreview();
+	previewWidget->SetPreviewActive(previewActive && previewWidget->GetSource());
 }
 
 void SwitcherWorkspaceSlot::SetSelected(bool active)
@@ -179,35 +471,66 @@ void SwitcherWorkspaceSlot::SetSelected(bool active)
 
 void SwitcherWorkspaceSlot::RefreshActiveState()
 {
-	QMetaObject::invokeMethod(dock, "ActiveChanged", Qt::QueuedConnection);
+	previewWidget->RefreshActiveState();
 }
 
 void SwitcherWorkspaceSlot::ClearIfMatches(obs_source_t *source)
 {
-	if (dock->GetSource().Get() == source)
+	if (previewWidget->GetSource().Get() == source)
 		SetSource(nullptr);
 }
 
 void SwitcherWorkspaceSlot::RefreshPresentation()
 {
-	titleLabel->setText(GetEffectiveTitle());
-	contentStack->setCurrentWidget(dock->GetSource() ? static_cast<QWidget *>(dock) : static_cast<QWidget *>(emptyLabel));
-	selectionButton->setToolTip(GetEffectiveTitle());
+	const bool hasSource = previewWidget->GetSource();
+	contentStack->setCurrentWidget(hasSource ? static_cast<QWidget *>(previewWidget) : static_cast<QWidget *>(emptyLabel));
+	contentStack->setAttribute(Qt::WA_TransparentForMouseEvents, !hasSource);
+	emptyLabel->setAttribute(Qt::WA_TransparentForMouseEvents, !hasSource);
+	RefreshTitleLabel();
 }
 
 void SwitcherWorkspaceSlot::resizeEvent(QResizeEvent *event)
 {
 	QFrame::resizeEvent(event);
-	selectionButton->setGeometry(rect());
-	selectionButton->raise();
+	RefreshTitleLabel();
+	titleLabel->raise();
+}
+
+void SwitcherWorkspaceSlot::RefreshTitleLabel()
+{
+	const QString title = GetEffectiveTitle();
+	const int horizontalMargin = 16;
+	const int maxWidth = std::max(112, width() - (horizontalMargin * 2));
+
+	titleLabel->setText(fontMetrics().elidedText(title, Qt::ElideRight, maxWidth));
+	titleLabel->setToolTip(title);
+	titleLabel->adjustSize();
+	titleLabel->resize(std::min(maxWidth, titleLabel->sizeHint().width() + 20), 28);
+	titleLabel->move(horizontalMargin, horizontalMargin);
 }
 
 void SwitcherWorkspaceSlot::RefreshSelectionState()
 {
-	selectionButton->setProperty("selected", selected);
-	style()->unpolish(selectionButton);
-	style()->polish(selectionButton);
-	selectionButton->update();
+	titleLabel->setProperty("selected", selected);
+	style()->unpolish(titleLabel);
+	style()->polish(titleLabel);
+	titleLabel->update();
+}
+
+void SwitcherWorkspaceSlot::ShowContextMenu(const QPoint &globalPos)
+{
+	contextMenu->exec(globalPos);
+}
+
+void SwitcherWorkspaceSlot::contextMenuEvent(QContextMenuEvent *event)
+{
+	if (!previewWidget->GetSource() && event) {
+		ShowContextMenu(event->globalPos());
+		event->accept();
+		return;
+	}
+
+	QFrame::contextMenuEvent(event);
 }
 
 QString SwitcherWorkspaceSlot::DefaultTitle() const
@@ -216,137 +539,112 @@ QString SwitcherWorkspaceSlot::DefaultTitle() const
 }
 
 SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
-	: QDockWidget(parent),
-	  scrollArea(new QScrollArea(this)),
-	  gridContainer(new QWidget(scrollArea)),
-	  gridLayout(new QGridLayout(gridContainer)),
-	  settingsButton(new QToolButton(scrollArea->viewport())),
-	  settingsPopup(new QDialog(this, Qt::Popup | Qt::FramelessWindowHint)),
-	  slotList(new QListWidget(settingsPopup)),
-	  layoutCombo(new QComboBox(settingsPopup)),
-	  sceneCombo(new QComboBox(settingsPopup)),
-	  titleEdit(new QLineEdit(settingsPopup)),
-	  clearSlotButton(new QPushButton(QT_UTF8(obs_module_text("Clear")), settingsPopup)),
-	  detachSlotButton(new QPushButton(QT_UTF8(obs_module_text("OpenDetachedView")), settingsPopup)),
-	  legacyManagerButton(new QPushButton(QT_UTF8(obs_module_text("OpenLegacyDockManager")), settingsPopup)),
-	  remoteEnabledCheckBox(new QCheckBox(QT_UTF8(obs_module_text("SwitcherRemoteEnable")), settingsPopup)),
-	  remoteAutoStartCheckBox(new QCheckBox(QT_UTF8(obs_module_text("SwitcherRemoteAutoStart")), settingsPopup)),
-	  remoteResolutionCombo(new QComboBox(settingsPopup)),
-	  remoteFpsCombo(new QComboBox(settingsPopup)),
-	  remoteUrlEdit(new QLineEdit(settingsPopup)),
-	  remoteStatusLabel(new QLabel(settingsPopup)),
-	  remoteCopyButton(new QPushButton(QT_UTF8(obs_module_text("SwitcherRemoteCopyUrl")), settingsPopup)),
-	  remoteRegenerateButton(new QPushButton(QT_UTF8(obs_module_text("SwitcherRemoteRegenerateToken")), settingsPopup)),
-	  remoteRestartButton(new QPushButton(QT_UTF8(obs_module_text("SwitcherRemoteRestart")), settingsPopup))
+	: QWidget(parent, Qt::Window),
+		  contentSplitter(new QSplitter(Qt::Horizontal, this)),
+		  scrollArea(new QScrollArea(contentSplitter)),
+		  gridContainer(new QWidget(scrollArea)),
+		  gridLayout(new QGridLayout(gridContainer)),
+		  inspectorFrame(new QFrame(contentSplitter)),
+		  inspectorModeButton(new QToolButton(inspectorFrame)),
+	  inspectorTitleLabel(new QLabel(inspectorFrame)),
+	  inspectorCloseButton(new QToolButton(inspectorFrame)),
+	  inspectorStack(new QStackedWidget(inspectorFrame)),
+	  workspacePage(new QWidget(inspectorStack)),
+	  slotPage(new QWidget(inspectorStack)),
+	  workspaceSettingsSection(new QWidget(workspacePage)),
+	  slotEditorSection(new QWidget(slotPage)),
+	  remoteSettingsSection(new QWidget(workspacePage)),
+	  slotList(new QListWidget(workspacePage)),
+	  layoutCombo(new QComboBox(workspacePage)),
+	  sceneCombo(new QComboBox(slotPage)),
+	  titleEdit(new QLineEdit(slotPage)),
+	  clearSlotButton(new QPushButton(QT_UTF8(obs_module_text("Clear")), slotPage)),
+	  detachSlotButton(new QPushButton(QT_UTF8(obs_module_text("OpenDetachedView")), slotPage)),
+	  legacyManagerButton(new QPushButton(QT_UTF8(obs_module_text("OpenLegacyDockManager")), workspacePage)),
+	  remoteEnabledCheckBox(new QCheckBox(QT_UTF8(obs_module_text("SwitcherRemoteEnable")), workspacePage)),
+	  remoteAutoStartCheckBox(new QCheckBox(QT_UTF8(obs_module_text("SwitcherRemoteAutoStart")), workspacePage)),
+	  remoteResolutionCombo(new QComboBox(workspacePage)),
+	  remoteFpsCombo(new QComboBox(workspacePage)),
+	  remoteUrlEdit(new QLineEdit(workspacePage)),
+	  remoteStatusLabel(new QLabel(workspacePage)),
+	  remoteCopyButton(new QPushButton(QT_UTF8(obs_module_text("SwitcherRemoteCopyUrl")), workspacePage)),
+	  remoteRegenerateButton(new QPushButton(QT_UTF8(obs_module_text("SwitcherRemoteRegenerateToken")), workspacePage)),
+	  remoteRestartButton(new QPushButton(QT_UTF8(obs_module_text("SwitcherRemoteRestart")), workspacePage))
 {
+	gWorkspaceDock = this;
+	setObjectName(QStringLiteral("switcherWorkspaceRoot"));
+	setAttribute(Qt::WA_StyledBackground, true);
 	setWindowTitle(QT_UTF8(obs_module_text("Switcher")));
-	setAllowedAreas(Qt::AllDockWidgetAreas);
+	setWindowFlag(Qt::WindowMinMaxButtonsHint, true);
+	setMinimumSize(1120, 720);
+	resize(1400, 860);
 
-	auto *root = new QWidget(this);
-	root->setObjectName(QStringLiteral("switcherWorkspaceRoot"));
-	root->setAttribute(Qt::WA_StyledBackground, true);
-	root->setStyleSheet(
-		"#switcherWorkspaceRoot {"
-		"  background: qlineargradient(x1:0, y1:0, x2:1, y2:1,"
-		"    stop:0 rgba(2, 6, 23, 255),"
-		"    stop:0.45 rgba(15, 23, 42, 255),"
-		"    stop:1 rgba(30, 41, 59, 255));"
-		"}"
-		"#switcherWorkspaceSlot {"
-		"  background-color: rgba(15, 23, 42, 228);"
-		"  border: 1px solid rgba(148, 163, 184, 52);"
-		"  border-radius: 20px;"
-		"}"
-		"#switcherWorkspaceSlotTitle {"
-		"  color: rgba(248, 250, 252, 242);"
-		"  font-weight: 700;"
-		"  font-size: 13px;"
-		"}"
-		"#switcherWorkspaceSlotEmpty {"
-		"  color: rgba(148, 163, 184, 220);"
-		"  font-size: 15px;"
-		"}"
-		"#switcherWorkspaceSlotHitTarget {"
-		"  background: transparent;"
-		"  border: 2px solid transparent;"
-		"  border-radius: 20px;"
-		"}"
-		"#switcherWorkspaceSlotHitTarget:hover {"
-		"  background-color: rgba(248, 250, 252, 12);"
-		"  border-color: rgba(125, 211, 252, 100);"
-		"}"
-		"#switcherWorkspaceSlotHitTarget[selected=\"true\"] {"
-		"  background-color: rgba(248, 250, 252, 18);"
-		"  border-color: rgba(248, 250, 252, 220);"
-		"}"
-		"#switcherWorkspaceSettingsSurface {"
-		"  background-color: rgba(2, 6, 23, 228);"
-		"  border: 1px solid rgba(148, 163, 184, 58);"
-		"  border-radius: 22px;"
-		"}"
-		"#switcherWorkspaceSettingsSurface QLabel {"
-		"  color: rgba(226, 232, 240, 238);"
-		"}"
-		"#switcherWorkspaceSettingsSurface QListWidget,"
-		"#switcherWorkspaceSettingsSurface QComboBox,"
-		"#switcherWorkspaceSettingsSurface QLineEdit {"
-		"  background-color: rgba(15, 23, 42, 232);"
-		"  color: rgba(248, 250, 252, 245);"
-		"  border: 1px solid rgba(148, 163, 184, 70);"
-		"  border-radius: 12px;"
-		"  padding: 8px 10px;"
-		"}"
-		"#switcherWorkspaceSettingsSurface QPushButton,"
-		"#switcherWorkspaceSettingsSurface QCheckBox {"
-		"  color: rgba(248, 250, 252, 245);"
-		"}"
-		"#switcherWorkspaceSettingsSurface QPushButton {"
-		"  background-color: rgba(30, 41, 59, 236);"
-		"  border: 1px solid rgba(148, 163, 184, 74);"
-		"  border-radius: 12px;"
-		"  padding: 9px 12px;"
-		"}"
-		"#switcherWorkspaceSettingsSurface QPushButton:hover {"
-		"  border-color: rgba(125, 211, 252, 120);"
-		"}"
-		"#switcherWorkspaceSettingsButton {"
-		"  background-color: rgba(2, 6, 23, 232);"
-		"  border: 1px solid rgba(148, 163, 184, 58);"
-		"  border-radius: 16px;"
-		"  color: rgba(248, 250, 252, 248);"
-		"  font-size: 22px;"
-		"  font-weight: 700;"
-		"}"
-		"#switcherWorkspaceSettingsButton:hover {"
-		"  background-color: rgba(15, 23, 42, 244);"
-		"  border-color: rgba(125, 211, 252, 120);"
-		"}"
-		"#switcherWorkspaceSettingsButton:pressed {"
-		"  background-color: rgba(30, 41, 59, 248);"
-		"}");
-
-	auto *rootLayout = new QVBoxLayout(root);
+	auto *rootLayout = new QVBoxLayout(this);
 	rootLayout->setContentsMargins(0, 0, 0, 0);
-	rootLayout->addWidget(scrollArea);
+	rootLayout->setSpacing(0);
+
+	contentSplitter->setChildrenCollapsible(false);
+	contentSplitter->setHandleWidth(6);
+	contentSplitter->setOpaqueResize(false);
+	contentSplitter->addWidget(scrollArea);
+	contentSplitter->addWidget(inspectorFrame);
+	contentSplitter->setStretchFactor(0, 1);
+	contentSplitter->setStretchFactor(1, 0);
+	rootLayout->addWidget(contentSplitter, 1);
 
 	scrollArea->setWidgetResizable(true);
 	scrollArea->setFrameShape(QFrame::NoFrame);
+	scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 	scrollArea->setWidget(gridContainer);
 
-	gridLayout->setContentsMargins(18, 18, 18, 18);
-	gridLayout->setSpacing(16);
+	gridLayout->setContentsMargins(22, 22, 22, 22);
+	gridLayout->setSpacing(18);
 
-	settingsButton->setObjectName(QStringLiteral("switcherWorkspaceSettingsButton"));
-	settingsButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
-	settingsButton->setText(QStringLiteral("⚙"));
-	settingsButton->setToolTip(QT_UTF8(obs_module_text("SwitcherOpenSettings")));
-	settingsButton->setCursor(Qt::PointingHandCursor);
-	settingsButton->setAutoRaise(false);
-	settingsButton->setFixedSize(52, 52);
+	inspectorFrame->setObjectName(QStringLiteral("switcherWorkspaceInspector"));
+	inspectorFrame->setAttribute(Qt::WA_StyledBackground, true);
+	inspectorFrame->setMinimumWidth(320);
+	inspectorFrame->setMaximumWidth(460);
+	inspectorFrame->hide();
+
+	auto *inspectorLayout = new QVBoxLayout(inspectorFrame);
+	inspectorLayout->setContentsMargins(0, 0, 0, 0);
+	inspectorLayout->setSpacing(0);
+
+	auto *inspectorHeader = new QWidget(inspectorFrame);
+	inspectorHeader->setObjectName(QStringLiteral("switcherWorkspaceInspectorHeader"));
+	inspectorHeader->setAttribute(Qt::WA_StyledBackground, true);
+	auto *inspectorHeaderLayout = new QHBoxLayout(inspectorHeader);
+	inspectorHeaderLayout->setContentsMargins(18, 18, 18, 12);
+	inspectorHeaderLayout->setSpacing(8);
+
+	inspectorModeButton->setObjectName(QStringLiteral("switcherWorkspaceInspectorModeButton"));
+	inspectorModeButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+	inspectorModeButton->setCursor(Qt::PointingHandCursor);
+	inspectorModeButton->setAutoRaise(false);
+	inspectorHeaderLayout->addWidget(inspectorModeButton);
+
+	inspectorTitleLabel->setObjectName(QStringLiteral("switcherWorkspaceSettingsTitle"));
+	inspectorHeaderLayout->addWidget(inspectorTitleLabel);
+	inspectorHeaderLayout->addStretch(1);
+
+	inspectorCloseButton->setObjectName(QStringLiteral("switcherWorkspaceInspectorCloseButton"));
+	inspectorCloseButton->setCursor(Qt::PointingHandCursor);
+	inspectorCloseButton->setAutoRaise(false);
+	inspectorCloseButton->setFixedSize(32, 32);
+	inspectorCloseButton->setIcon(style()->standardIcon(QStyle::SP_TitleBarCloseButton));
+	inspectorHeaderLayout->addWidget(inspectorCloseButton);
+	inspectorLayout->addWidget(inspectorHeader);
+
+	inspectorStack->setObjectName(QStringLiteral("switcherWorkspaceInspectorStack"));
+	inspectorLayout->addWidget(inspectorStack, 1);
+	inspectorStack->addWidget(workspacePage);
+	inspectorStack->addWidget(slotPage);
 
 	for (int index = 0; index < kMaxSwitcherSlots; index++) {
 		auto *slot = new SwitcherWorkspaceSlot(index, gridContainer);
-		connect(slot, &SwitcherWorkspaceSlot::Clicked, this, &SwitcherWorkspaceDock::SelectSlot);
+		connect(slot, &SwitcherWorkspaceSlot::ConfigureRequested, this, &SwitcherWorkspaceDock::OpenSlotSettings);
+		connect(slot, &SwitcherWorkspaceSlot::DetachRequested, this, &SwitcherWorkspaceDock::OpenSlotAsDock);
+		connect(slot, &SwitcherWorkspaceSlot::AdvancedRequested, this, &SwitcherWorkspaceDock::OpenAdvancedSettings);
 		slotWidgets.push_back(slot);
 	}
 
@@ -357,6 +655,7 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 
 	slotList->setMaximumHeight(220);
 	slotList->setAlternatingRowColors(true);
+	slotList->hide();
 
 	remoteResolutionCombo->addItem(QT_UTF8(obs_module_text("SwitcherRemote720p")), QSize(1280, 720));
 	remoteResolutionCombo->addItem(QT_UTF8(obs_module_text("SwitcherRemote1080p")), QSize(1920, 1080));
@@ -369,68 +668,64 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	remoteUrlEdit->setReadOnly(true);
 	remoteStatusLabel->setWordWrap(true);
 
-	auto *settingsRootLayout = new QVBoxLayout(settingsPopup);
-	settingsRootLayout->setContentsMargins(0, 0, 0, 0);
-	settingsRootLayout->setSpacing(0);
+	auto *workspacePageLayout = new QVBoxLayout(workspacePage);
+	workspacePageLayout->setContentsMargins(18, 0, 18, 18);
+	workspacePageLayout->setSpacing(14);
 
-	auto *settingsSurface = new QFrame(settingsPopup);
-	settingsSurface->setObjectName(QStringLiteral("switcherWorkspaceSettingsSurface"));
-	settingsSurface->setAttribute(Qt::WA_StyledBackground, true);
-	settingsRootLayout->addWidget(settingsSurface);
-
-	auto *settingsLayout = new QVBoxLayout(settingsSurface);
-	settingsLayout->setContentsMargins(18, 18, 18, 18);
-	settingsLayout->setSpacing(14);
-
-	auto *settingsTitle = new QLabel(QT_UTF8(obs_module_text("SwitcherSettings")), settingsSurface);
-	settingsTitle->setStyleSheet("color: rgba(248, 250, 252, 245); font-size: 17px; font-weight: 700;");
-	settingsLayout->addWidget(settingsTitle);
+	auto *workspaceSettingsLayout = new QVBoxLayout(workspaceSettingsSection);
+	workspaceSettingsLayout->setContentsMargins(0, 0, 0, 0);
+	workspaceSettingsLayout->setSpacing(14);
 
 	auto *layoutForm = new QFormLayout;
 	layoutForm->setLabelAlignment(Qt::AlignLeft);
 	layoutForm->addRow(QT_UTF8(obs_module_text("SwitcherLayout")), layoutCombo);
-	settingsLayout->addLayout(layoutForm);
+	workspaceSettingsLayout->addLayout(layoutForm);
+	workspaceSettingsLayout->addWidget(legacyManagerButton);
+	workspacePageLayout->addWidget(workspaceSettingsSection);
 
-	auto *slotsLabel = new QLabel(QT_UTF8(obs_module_text("SwitcherSlots")), settingsSurface);
-	slotsLabel->setStyleSheet("color: rgba(248, 250, 252, 240); font-weight: 700;");
-	settingsLayout->addWidget(slotsLabel);
-	settingsLayout->addWidget(slotList);
+	auto *slotPageLayout = new QVBoxLayout(slotPage);
+	slotPageLayout->setContentsMargins(18, 0, 18, 18);
+	slotPageLayout->setSpacing(14);
+
+	auto *slotEditorLayout = new QVBoxLayout(slotEditorSection);
+	slotEditorLayout->setContentsMargins(0, 0, 0, 0);
+	slotEditorLayout->setSpacing(12);
 
 	auto *editorForm = new QFormLayout;
 	editorForm->setLabelAlignment(Qt::AlignLeft);
 	editorForm->addRow(QT_UTF8(obs_module_text("Source")), sceneCombo);
 	editorForm->addRow(QT_UTF8(obs_module_text("Title")), titleEdit);
-	settingsLayout->addLayout(editorForm);
+	slotEditorLayout->addLayout(editorForm);
+	slotEditorLayout->addWidget(clearSlotButton);
+	slotEditorLayout->addWidget(detachSlotButton);
+	slotPageLayout->addWidget(slotEditorSection);
+	slotPageLayout->addStretch(1);
 
-	settingsLayout->addWidget(clearSlotButton);
-	settingsLayout->addWidget(detachSlotButton);
-	settingsLayout->addWidget(legacyManagerButton);
+	auto *remoteSettingsLayout = new QVBoxLayout(remoteSettingsSection);
+	remoteSettingsLayout->setContentsMargins(0, 0, 0, 0);
+	remoteSettingsLayout->setSpacing(12);
+	auto *remoteLabel = new QLabel(QT_UTF8(obs_module_text("SwitcherRemote")), remoteSettingsSection);
+	remoteLabel->setObjectName(QStringLiteral("switcherWorkspaceSettingsSectionTitle"));
+	remoteSettingsLayout->addWidget(remoteLabel);
+	remoteSettingsLayout->addWidget(remoteEnabledCheckBox);
+	remoteSettingsLayout->addWidget(remoteAutoStartCheckBox);
 
 	auto *remoteForm = new QFormLayout;
 	remoteForm->setLabelAlignment(Qt::AlignLeft);
-	auto *remoteLabel = new QLabel(QT_UTF8(obs_module_text("SwitcherRemote")), settingsSurface);
-	remoteLabel->setStyleSheet("color: rgba(248, 250, 252, 240); font-weight: 700;");
-	settingsLayout->addWidget(remoteLabel);
-	settingsLayout->addWidget(remoteEnabledCheckBox);
-	settingsLayout->addWidget(remoteAutoStartCheckBox);
 	remoteForm->addRow(QT_UTF8(obs_module_text("SwitcherRemoteResolution")), remoteResolutionCombo);
 	remoteForm->addRow(QT_UTF8(obs_module_text("SwitcherRemoteFps")), remoteFpsCombo);
 	remoteForm->addRow(QT_UTF8(obs_module_text("SwitcherRemoteUrl")), remoteUrlEdit);
 	remoteForm->addRow(QT_UTF8(obs_module_text("SwitcherRemoteStatus")), remoteStatusLabel);
-	settingsLayout->addLayout(remoteForm);
-	settingsLayout->addWidget(remoteCopyButton);
-	settingsLayout->addWidget(remoteRegenerateButton);
-	settingsLayout->addWidget(remoteRestartButton);
-	settingsLayout->addStretch(1);
-
-	setWidget(root);
-	resize(1280, 820);
-	settingsPopup->setAttribute(Qt::WA_StyledBackground, true);
-	settingsPopup->setMinimumWidth(360);
-	settingsPopup->setMaximumWidth(440);
+	remoteSettingsLayout->addLayout(remoteForm);
+	remoteSettingsLayout->addWidget(remoteCopyButton);
+	remoteSettingsLayout->addWidget(remoteRegenerateButton);
+	remoteSettingsLayout->addWidget(remoteRestartButton);
+	workspacePageLayout->addWidget(remoteSettingsSection);
+	workspacePageLayout->addStretch(1);
 
 	connect(layoutCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &SwitcherWorkspaceDock::LayoutChanged);
 	connect(slotList, &QListWidget::currentRowChanged, this, &SwitcherWorkspaceDock::SelectedSlotChanged);
+	connect(slotList, &QListWidget::itemActivated, this, [this](QListWidgetItem *) { OpenSelectedSlotInspector(); });
 	connect(sceneCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &SwitcherWorkspaceDock::SelectedSceneChanged);
 	connect(titleEdit, &QLineEdit::textChanged, this, &SwitcherWorkspaceDock::SelectedTitleChanged);
 	connect(clearSlotButton, &QPushButton::clicked, this, &SwitcherWorkspaceDock::ClearSelectedSlot);
@@ -444,7 +739,8 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	connect(remoteCopyButton, &QPushButton::clicked, this, &SwitcherWorkspaceDock::CopyRemoteUrl);
 	connect(remoteRegenerateButton, &QPushButton::clicked, this, &SwitcherWorkspaceDock::RegenerateRemoteToken);
 	connect(remoteRestartButton, &QPushButton::clicked, this, &SwitcherWorkspaceDock::RestartRemote);
-	connect(settingsButton, &QToolButton::clicked, this, &SwitcherWorkspaceDock::ToggleSettingsPopup);
+	connect(inspectorModeButton, &QToolButton::clicked, this, [this] { ShowSettingsPanel(SettingsPanelMode::Workspace); });
+	connect(inspectorCloseButton, &QToolButton::clicked, this, &SwitcherWorkspaceDock::HideSettingsPanel);
 	connect(SwitcherRemoteManager::Instance(), &SwitcherRemoteManager::StateChanged, this,
 		&SwitcherWorkspaceDock::RemoteStateUpdated);
 
@@ -453,24 +749,44 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	RefreshSceneOptions();
 	RefreshSelectedSlotEditor();
 	RemoteStateUpdated();
-	PositionChrome();
+	RefreshSettingsPanelMode();
+	UpdateInspectorVisibility(false);
+	ApplyTheme();
 }
 
-obs_data_t *SwitcherWorkspaceDock::SaveState()
+SwitcherWorkspaceDock::~SwitcherWorkspaceDock()
+{
+	if (gWorkspaceDock == this)
+		gWorkspaceDock = nullptr;
+}
+
+void SwitcherWorkspaceDock::OpenWorkspaceWindow()
+{
+	if (!workspacePlacementInitialized)
+		ApplyDefaultWindowGeometry();
+
+	if (isMinimized())
+		showNormal();
+	else
+		show();
+
+	raise();
+	activateWindow();
+}
+
+obs_data_t *SwitcherWorkspaceDock::SaveContentState() const
 {
 	obs_data_t *data = obs_data_create();
 	obs_data_set_int(data, "visible_slots", VisibleSlotCount());
-	obs_data_set_bool(data, "visible", isVisible());
-	obs_data_set_bool(data, "floating", isFloating());
-	obs_data_set_int(data, "dockarea",
-			 static_cast<int>(static_cast<QMainWindow *>(obs_frontend_get_main_window())->dockWidgetArea(this)));
-	obs_data_set_string(data, "geometry", saveGeometry().toBase64().constData());
 
 	obs_data_array_t *slotArray = obs_data_array_create();
 	for (const auto &slot : slotWidgets) {
 		obs_data_t *slotData = obs_data_create();
-		if (auto source = slot->GetSource())
-			obs_data_set_string(slotData, "source_name", obs_source_get_name(source));
+		if (auto source = slot->GetSource()) {
+			const char *sourceUuid = obs_source_get_uuid(source);
+			if (sourceUuid && strlen(sourceUuid) > 0)
+				obs_data_set_string(slotData, "source_uuid", sourceUuid);
+		}
 		if (!slot->GetCustomTitle().isEmpty())
 			obs_data_set_string(slotData, "title", QT_TO_UTF8(slot->GetCustomTitle()));
 		obs_data_array_push_back(slotArray, slotData);
@@ -478,15 +794,10 @@ obs_data_t *SwitcherWorkspaceDock::SaveState()
 	}
 	obs_data_set_array(data, "slots", slotArray);
 	obs_data_array_release(slotArray);
-
-	obs_data_t *remoteData = SwitcherRemoteManager::Instance()->SaveState();
-	obs_data_set_obj(data, kRemoteStateKey, remoteData);
-	obs_data_release(remoteData);
-
 	return data;
 }
 
-void SwitcherWorkspaceDock::LoadState(obs_data_t *data)
+void SwitcherWorkspaceDock::LoadContentState(obs_data_t *data, bool emitSignal)
 {
 	loadingState = true;
 
@@ -496,9 +807,8 @@ void SwitcherWorkspaceDock::LoadState(obs_data_t *data)
 	}
 
 	int layoutIndex = layoutCombo->findData(4);
-	if (data) {
+	if (data)
 		layoutIndex = layoutCombo->findData(NormalizeVisibleSlotCount(static_cast<int>(obs_data_get_int(data, "visible_slots"))));
-	}
 	if (layoutIndex < 0)
 		layoutIndex = 0;
 	layoutCombo->setCurrentIndex(layoutIndex);
@@ -511,50 +821,102 @@ void SwitcherWorkspaceDock::LoadState(obs_data_t *data)
 				obs_data_t *slotData = obs_data_array_item(slotArray, index);
 				slotWidgets[index]->SetCustomTitle(QT_UTF8(obs_data_get_string(slotData, "title")));
 
-				const char *sourceName = obs_data_get_string(slotData, "source_name");
-				if (sourceName && strlen(sourceName) > 0) {
-					obs_source_t *source = obs_get_source_by_name(sourceName);
-					slotWidgets[index]->SetSource(source);
-					if (source)
-						obs_source_release(source);
-				}
+				obs_source_t *source = ResolveStoredSource(slotData);
+				slotWidgets[index]->SetSource(source);
+				if (source)
+					obs_source_release(source);
 
 				obs_data_release(slotData);
 			}
 			obs_data_array_release(slotArray);
 		}
-
-		auto *mainWindow = static_cast<QMainWindow *>(obs_frontend_get_main_window());
-		const auto dockArea = static_cast<Qt::DockWidgetArea>(obs_data_get_int(data, "dockarea"));
-		if (dockArea != Qt::NoDockWidgetArea && mainWindow->dockWidgetArea(this) != dockArea)
-			mainWindow->addDockWidget(dockArea, this);
-
-		const bool floating = obs_data_get_bool(data, "floating");
-		if (isFloating() != floating)
-			setFloating(floating);
-
-		const char *geometry = obs_data_get_string(data, "geometry");
-		if (geometry && strlen(geometry) > 0)
-			restoreGeometry(QByteArray::fromBase64(QByteArray(geometry)));
-
-		if (obs_data_get_bool(data, "visible"))
-			show();
-		else
-			hide();
 	}
 
 	loadingState = false;
-
-	obs_data_t *remoteData = data ? obs_data_get_obj(data, kRemoteStateKey) : nullptr;
-	SwitcherRemoteManager::Instance()->LoadState(remoteData);
-	if (remoteData)
-		obs_data_release(remoteData);
 
 	RefreshGrid();
 	RefreshSlotList();
 	RefreshSceneOptions();
 	RefreshSelectedSlotEditor();
 	ApplyPreviewState(isVisible());
+	if (emitSignal)
+		emit WorkspaceStateChanged();
+}
+
+void SwitcherWorkspaceDock::RegisterUndoRedoAction(const char *name, obs_data_t *before, obs_data_t *after, bool repeatable)
+{
+	if (applyingUndoRedo || !before || !after)
+		return;
+
+	const char *beforeJson = obs_data_get_json(before);
+	const char *afterJson = obs_data_get_json(after);
+	if (!beforeJson || !afterJson || strcmp(beforeJson, afterJson) == 0)
+		return;
+
+	obs_frontend_add_undo_redo_action(name, ApplyWorkspaceUndoState, ApplyWorkspaceUndoState, beforeJson, afterJson,
+					  repeatable);
+}
+
+void SwitcherWorkspaceDock::ApplySerializedContentState(const char *json)
+{
+	if (!json || !strlen(json))
+		return;
+
+	obs_data_t *data = obs_data_create_from_json(json);
+	if (!data)
+		return;
+
+	applyingUndoRedo = true;
+	LoadContentState(data, true);
+	applyingUndoRedo = false;
+	obs_data_release(data);
+}
+
+obs_data_t *SwitcherWorkspaceDock::SaveState()
+{
+	obs_data_t *data = SaveContentState();
+	obs_data_set_bool(data, "visible", isVisible());
+	obs_data_set_bool(data, "inspector_visible", inspectorFrame->isVisible());
+	obs_data_set_int(data, "inspector_width", inspectorFrame->isVisible() ? inspectorFrame->width() : inspectorWidth);
+	if (workspacePlacementInitialized)
+		obs_data_set_string(data, "geometry", saveGeometry().toBase64().constData());
+
+	obs_data_t *remoteData = SwitcherRemoteManager::Instance()->SaveState();
+	obs_data_set_obj(data, kRemoteStateKey, remoteData);
+	obs_data_release(remoteData);
+
+	return data;
+}
+
+void SwitcherWorkspaceDock::LoadState(obs_data_t *data)
+{
+	LoadContentState(data, false);
+
+	workspacePlacementInitialized = false;
+	if (data) {
+		const char *geometry = obs_data_get_string(data, "geometry");
+		if (geometry && strlen(geometry) > 0)
+			workspacePlacementInitialized = restoreGeometry(QByteArray::fromBase64(QByteArray(geometry)));
+
+		inspectorWidth = std::max(320, static_cast<int>(obs_data_get_int(data, "inspector_width")));
+		if (obs_data_get_bool(data, "inspector_visible"))
+			ShowSettingsPanel(SettingsPanelMode::Workspace);
+		else
+			HideSettingsPanel();
+
+		if (obs_data_get_bool(data, "visible"))
+			OpenWorkspaceWindow();
+		else
+			hide();
+	} else {
+		HideSettingsPanel();
+	}
+
+	obs_data_t *remoteData = data ? obs_data_get_obj(data, kRemoteStateKey) : nullptr;
+	SwitcherRemoteManager::Instance()->LoadState(remoteData);
+	if (remoteData)
+		obs_data_release(remoteData);
+
 	RemoteStateUpdated();
 	emit WorkspaceStateChanged();
 }
@@ -593,6 +955,7 @@ void SwitcherWorkspaceDock::HandleFrontendEvent(enum obs_frontend_event event)
 		break;
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP:
 	case OBS_FRONTEND_EVENT_EXIT:
+		HideSettingsPanel();
 		ClearSceneCollectionState();
 		ApplyPreviewState(false);
 		break;
@@ -623,38 +986,58 @@ void SwitcherWorkspaceDock::ClearSceneCollectionState()
 
 void SwitcherWorkspaceDock::showEvent(QShowEvent *event)
 {
-	QDockWidget::showEvent(event);
+	QWidget::showEvent(event);
 	RefreshSceneOptions();
 	RefreshSlotList();
 	RefreshSelectedSlotEditor();
 	ApplyPreviewState(true);
 	for (int index = 0; index < VisibleSlotCount(); index++)
 		slotWidgets[index]->RefreshActiveState();
-	PositionChrome();
 }
 
 void SwitcherWorkspaceDock::hideEvent(QHideEvent *event)
 {
 	ApplyPreviewState(false);
-	if (settingsPopup->isVisible())
-		settingsPopup->hide();
-	QDockWidget::hideEvent(event);
+	QWidget::hideEvent(event);
 }
 
 void SwitcherWorkspaceDock::resizeEvent(QResizeEvent *event)
 {
-	QDockWidget::resizeEvent(event);
-	PositionChrome();
+	QWidget::resizeEvent(event);
+}
+
+void SwitcherWorkspaceDock::changeEvent(QEvent *event)
+{
+	QWidget::changeEvent(event);
+
+	switch (event->type()) {
+	case QEvent::PaletteChange:
+	case QEvent::StyleChange:
+	case QEvent::ApplicationPaletteChange:
+		ApplyTheme();
+		break;
+	case QEvent::WindowStateChange:
+		ApplyPreviewState(isVisible() && !isMinimized());
+		break;
+	default:
+		break;
+	}
 }
 
 void SwitcherWorkspaceDock::LayoutChanged()
 {
 	if (loadingState)
 		return;
+
+	obs_data_t *before = SaveContentState();
 	RefreshGrid();
 	RefreshSlotList();
 	RefreshSceneOptions();
 	RefreshSelectedSlotEditor();
+	obs_data_t *after = SaveContentState();
+	RegisterUndoRedoAction(obs_module_text("SwitcherUndoLayout"), before, after);
+	obs_data_release(before);
+	obs_data_release(after);
 	emit WorkspaceStateChanged();
 }
 
@@ -663,14 +1046,9 @@ void SwitcherWorkspaceDock::SelectedSlotChanged()
 	RefreshSelectionHighlights();
 	RefreshSceneOptions();
 	RefreshSelectedSlotEditor();
-}
-
-void SwitcherWorkspaceDock::SelectSlot(int slotIndex)
-{
-	if (slotIndex < 0 || slotIndex >= VisibleSlotCount())
-		return;
-
-	slotList->setCurrentRow(slotIndex);
+	if (inspectorFrame->isVisible()) {
+		RefreshSettingsPanelMode();
+	}
 }
 
 void SwitcherWorkspaceDock::SelectedSceneChanged()
@@ -682,14 +1060,21 @@ void SwitcherWorkspaceDock::SelectedSceneChanged()
 	if (!slot)
 		return;
 
-	const auto sourceName = sceneCombo->currentData().toByteArray();
-	obs_source_t *source = sourceName.isEmpty() ? nullptr : obs_get_source_by_name(sourceName.constData());
+	obs_data_t *before = SaveContentState();
+	const auto sourceUuid = sceneCombo->currentData().toByteArray();
+	obs_source_t *source = sourceUuid.isEmpty() ? nullptr : obs_get_source_by_uuid(sourceUuid.constData());
 	slot->SetSource(source);
 	if (source)
 		obs_source_release(source);
 
 	RefreshSlotList();
 	RefreshSelectedSlotEditor();
+	if (inspectorFrame->isVisible())
+		RefreshSettingsPanelMode();
+	obs_data_t *after = SaveContentState();
+	RegisterUndoRedoAction(obs_module_text("SwitcherUndoAssignScene"), before, after);
+	obs_data_release(before);
+	obs_data_release(after);
 	emit WorkspaceStateChanged();
 }
 
@@ -702,8 +1087,15 @@ void SwitcherWorkspaceDock::SelectedTitleChanged(const QString &title)
 	if (!slot)
 		return;
 
+	obs_data_t *before = SaveContentState();
 	slot->SetCustomTitle(title);
 	RefreshSlotList();
+	obs_data_t *after = SaveContentState();
+	RegisterUndoRedoAction(obs_module_text("SwitcherUndoRenameView"), before, after, true);
+	obs_data_release(before);
+	obs_data_release(after);
+	if (inspectorFrame->isVisible())
+		RefreshSettingsPanelMode();
 	emit WorkspaceStateChanged();
 }
 
@@ -713,6 +1105,7 @@ void SwitcherWorkspaceDock::ClearSelectedSlot()
 	if (!slot)
 		return;
 
+	obs_data_t *before = SaveContentState();
 	loadingState = true;
 	slot->SetCustomTitle(QString());
 	slot->SetSource(nullptr);
@@ -721,6 +1114,12 @@ void SwitcherWorkspaceDock::ClearSelectedSlot()
 	RefreshSlotList();
 	RefreshSceneOptions();
 	RefreshSelectedSlotEditor();
+	if (inspectorFrame->isVisible())
+		RefreshSettingsPanelMode();
+	obs_data_t *after = SaveContentState();
+	RegisterUndoRedoAction(obs_module_text("SwitcherUndoClearView"), before, after);
+	obs_data_release(before);
+	obs_data_release(after);
 	emit WorkspaceStateChanged();
 }
 
@@ -735,26 +1134,30 @@ void SwitcherWorkspaceDock::OpenSelectedSlotAsDock()
 		return;
 
 	const auto title = slot->GetEffectiveTitle();
-	const auto id = QString("switcher-detached-%1").arg(NextDetachedDockId());
-	auto *tmp = new SwitcherDock(title, false, static_cast<QMainWindow *>(obs_frontend_get_main_window()));
-	tmp->SetSource(source);
-	tmp->EnablePreview();
-	tmp->EnableSwitchScene();
-	tmp->EnableShowActive();
+	auto *mainWindow = static_cast<QMainWindow *>(obs_frontend_get_main_window());
 
-	const auto dockId = id.toUtf8();
-	const auto dockTitle = title.toUtf8();
-	if (!obs_frontend_add_dock_by_id(dockId.constData(), dockTitle.constData(), tmp)) {
-		delete tmp;
+	SwitcherDockRegistrationOptions options;
+	options.dockId = SwitcherDock::CreateDockId();
+	options.preview = true;
+	options.switchScene = true;
+	options.showActive = true;
+	options.visible = true;
+	options.applyPlacement = true;
+	options.dockArea = Qt::RightDockWidgetArea;
+	options.floating = true;
+
+	CreateRegisteredSwitcherDock(title, source, mainWindow, options);
+}
+
+void SwitcherWorkspaceDock::OpenSlotAsDock(int slotIndex)
+{
+	if (slotIndex < 0 || slotIndex >= VisibleSlotCount())
 		return;
-	}
 
-	switcher_docks.push_back(tmp);
-	if (auto *dockWidget = qobject_cast<QDockWidget *>(tmp->parentWidget())) {
-		dockWidget->show();
-		dockWidget->raise();
-		dockWidget->setFloating(true);
-	}
+	if (slotList->currentRow() != slotIndex)
+		slotList->setCurrentRow(slotIndex);
+
+	OpenSelectedSlotAsDock();
 }
 
 void SwitcherWorkspaceDock::OpenLegacyDockManager()
@@ -762,21 +1165,6 @@ void SwitcherWorkspaceDock::OpenLegacyDockManager()
 	const auto dialog = new SwitcherSettingsDialog(static_cast<QMainWindow *>(obs_frontend_get_main_window()));
 	dialog->setAttribute(Qt::WA_DeleteOnClose, true);
 	dialog->show();
-}
-
-void SwitcherWorkspaceDock::ToggleSettingsPopup()
-{
-	if (settingsPopup->isVisible()) {
-		settingsPopup->hide();
-		return;
-	}
-
-	RefreshSceneOptions();
-	RefreshSelectedSlotEditor();
-	RefreshRemoteControls();
-	PositionSettingsPopup();
-	settingsPopup->show();
-	settingsPopup->raise();
 }
 
 void SwitcherWorkspaceDock::RemoteStateUpdated()
@@ -822,8 +1210,9 @@ void SwitcherWorkspaceDock::RestartRemote()
 bool SwitcherWorkspaceDock::AddSceneOption(void *data, obs_source_t *source)
 {
 	const char *sourceName = obs_source_get_name(source);
+	const char *sourceUuid = obs_source_get_uuid(source);
 	auto *combo = static_cast<QComboBox *>(data);
-	combo->addItem(QT_UTF8(sourceName), QByteArray(sourceName));
+	combo->addItem(QT_UTF8(sourceName), sourceUuid ? QByteArray(sourceUuid) : QByteArray());
 	return true;
 }
 
@@ -869,25 +1258,30 @@ void SwitcherWorkspaceDock::RefreshGrid()
 
 	ApplyPreviewState(isVisible() && previewsEnabled);
 	RefreshSelectionHighlights();
-	PositionChrome();
 }
 
 void SwitcherWorkspaceDock::RefreshSceneOptions()
 {
 	auto *slot = CurrentSlot();
+	const QByteArray selectedSourceUuid =
+		slot && slot->GetSource() ? QByteArray(obs_source_get_uuid(slot->GetSource())) : QByteArray();
 	const QString selectedSourceName =
 		slot && slot->GetSource() ? QT_UTF8(obs_source_get_name(slot->GetSource())) : QString();
 
 	QSignalBlocker blocker(sceneCombo);
 	sceneCombo->clear();
 	sceneCombo->addItem(QT_UTF8(obs_module_text("SwitcherNoScene")), QByteArray(""));
-	obs_enum_scenes(AddSceneOption, sceneCombo);
 
-	if (!selectedSourceName.isEmpty()) {
-		const auto sourceData = selectedSourceName.toUtf8();
-		int index = sceneCombo->findData(sourceData);
+	struct obs_frontend_source_list scenes = {};
+	obs_frontend_get_scenes(&scenes);
+	for (size_t index = 0; index < scenes.sources.num; index++)
+		AddSceneOption(sceneCombo, scenes.sources.array[index]);
+	obs_frontend_source_list_free(&scenes);
+
+	if (!selectedSourceUuid.isEmpty()) {
+		int index = sceneCombo->findData(selectedSourceUuid);
 		if (index < 0) {
-			sceneCombo->addItem(selectedSourceName, sourceData);
+			sceneCombo->addItem(selectedSourceName, selectedSourceUuid);
 			index = sceneCombo->count() - 1;
 		}
 		sceneCombo->setCurrentIndex(index);
@@ -963,47 +1357,295 @@ void SwitcherWorkspaceDock::RefreshRemoteControls()
 
 void SwitcherWorkspaceDock::RefreshSelectionHighlights()
 {
-	const int selectedIndex = SelectedSlotIndex();
-	for (int index = 0; index < static_cast<int>(slotWidgets.size()); index++)
-		slotWidgets[static_cast<size_t>(index)]->SetSelected(index == selectedIndex && index < VisibleSlotCount());
+	const bool editingSlots = inspectorFrame->isVisible() && settingsPanelMode == SettingsPanelMode::SlotInspector;
+	const int visibleSlots = VisibleSlotCount();
+	const int selectedIndex = editingSlots ? SelectedSlotIndex() : -1;
+
+	for (int index = 0; index < static_cast<int>(slotWidgets.size()); index++) {
+		auto *slot = slotWidgets[static_cast<size_t>(index)];
+		const bool slotVisible = index < visibleSlots;
+		slot->SetSelected(slotVisible && index == selectedIndex);
+	}
 }
 
-void SwitcherWorkspaceDock::PositionChrome()
+void SwitcherWorkspaceDock::UpdateInspectorVisibility(bool visible)
 {
-	if (!scrollArea || !scrollArea->viewport())
+	if (!contentSplitter || !inspectorFrame)
 		return;
 
-	auto *viewport = scrollArea->viewport();
-	settingsButton->move(viewport->width() - settingsButton->width() - kChromeMargin, kChromeMargin);
-	settingsButton->raise();
-
-	if (settingsPopup->isVisible())
-		PositionSettingsPopup();
-}
-
-void SwitcherWorkspaceDock::PositionSettingsPopup()
-{
-	settingsPopup->adjustSize();
-
-	const QPoint desiredTopRight = settingsButton->mapToGlobal(QPoint(settingsButton->width(), settingsButton->height() + 10));
-	QRect popupRect(QPoint(desiredTopRight.x() - settingsPopup->width(), desiredTopRight.y()), settingsPopup->size());
-
-	QScreen *screen = QGuiApplication::screenAt(desiredTopRight);
-	if (!screen)
-		screen = QGuiApplication::primaryScreen();
-	if (screen) {
-		const QRect available = screen->availableGeometry();
-		if (popupRect.right() > available.right())
-			popupRect.moveRight(available.right() - 8);
-		if (popupRect.left() < available.left())
-			popupRect.moveLeft(available.left() + 8);
-		if (popupRect.bottom() > available.bottom())
-			popupRect.moveBottom(available.bottom() - 8);
-		if (popupRect.top() < available.top())
-			popupRect.moveTop(available.top() + 8);
+	if (!visible) {
+		if (inspectorFrame->isVisible())
+			inspectorWidth = std::max(inspectorFrame->minimumWidth(), inspectorFrame->width());
+		inspectorFrame->hide();
+		contentSplitter->setSizes({1, 0});
+		RefreshSelectionHighlights();
+		return;
 	}
 
-	settingsPopup->move(popupRect.topLeft());
+	inspectorFrame->show();
+	const int targetWidth = std::clamp(inspectorWidth, inspectorFrame->minimumWidth(), inspectorFrame->maximumWidth());
+	const int totalWidth = std::max(width(), minimumWidth());
+	contentSplitter->setSizes({std::max(320, totalWidth - targetWidth), targetWidth});
+	RefreshSelectionHighlights();
+}
+
+void SwitcherWorkspaceDock::ApplyDefaultWindowGeometry()
+{
+	QScreen *screen = nullptr;
+	if (windowHandle())
+		screen = windowHandle()->screen();
+	if (!screen)
+		screen = QGuiApplication::screenAt(mapToGlobal(rect().center()));
+	if (!screen)
+		screen = QGuiApplication::primaryScreen();
+	if (!screen)
+		return;
+
+	const QRect available = screen->availableGeometry();
+	const int horizontalInset = std::max(available.width() / 14, 56);
+	const int verticalInset = std::max(available.height() / 12, 48);
+	QRect target = available.adjusted(horizontalInset, verticalInset, -horizontalInset, -verticalInset);
+	const QSize minimum = minimumSize().boundedTo(available.size());
+
+	if (target.width() < minimum.width() || target.height() < minimum.height()) {
+		target.setSize(target.size().expandedTo(minimum).boundedTo(available.size()));
+		target.moveCenter(available.center());
+	}
+
+	if (target.left() < available.left())
+		target.moveLeft(available.left());
+	if (target.top() < available.top())
+		target.moveTop(available.top());
+	if (target.right() > available.right())
+		target.moveRight(available.right());
+	if (target.bottom() > available.bottom())
+		target.moveBottom(available.bottom());
+
+	setGeometry(target);
+	workspacePlacementInitialized = true;
+}
+
+void SwitcherWorkspaceDock::OpenSlotSettings(int slotIndex)
+{
+	if (slotIndex < 0 || slotIndex >= VisibleSlotCount())
+		return;
+
+	if (slotList->currentRow() != slotIndex)
+		slotList->setCurrentRow(slotIndex);
+
+	ShowSettingsPanel(SettingsPanelMode::SlotInspector);
+}
+
+void SwitcherWorkspaceDock::OpenAdvancedSettings(int slotIndex)
+{
+	if (slotIndex < 0 || slotIndex >= VisibleSlotCount())
+		return;
+
+	if (slotList->currentRow() != slotIndex)
+		slotList->setCurrentRow(slotIndex);
+
+	ShowSettingsPanel(SettingsPanelMode::Workspace);
+}
+
+void SwitcherWorkspaceDock::OpenSelectedSlotInspector()
+{
+	OpenSlotSettings(SelectedSlotIndex());
+}
+
+QString SwitcherWorkspaceDock::CurrentSlotLabel() const
+{
+	if (auto *slot = CurrentSlot())
+		return slot->GetEffectiveTitle();
+	return QString("%1 1").arg(QT_UTF8(obs_module_text("SwitcherSlot")));
+}
+
+void SwitcherWorkspaceDock::RefreshSettingsPanelMode()
+{
+	const bool slotInspector = settingsPanelMode == SettingsPanelMode::SlotInspector;
+	inspectorTitleLabel->setText(slotInspector ? CurrentSlotLabel() : QT_UTF8(obs_module_text("SwitcherAdvancedSettings")));
+	inspectorStack->setCurrentWidget(slotInspector ? slotPage : workspacePage);
+	inspectorModeButton->setVisible(slotInspector);
+	inspectorModeButton->setText(QT_UTF8(obs_module_text("SwitcherAdvanced")));
+	inspectorModeButton->setToolTip(QT_UTF8(obs_module_text("SwitcherOpenAdvancedSettings")));
+	inspectorModeButton->setIcon(style()->standardIcon(QStyle::SP_ArrowLeft));
+}
+
+void SwitcherWorkspaceDock::ShowSettingsPanel(SettingsPanelMode mode)
+{
+	settingsPanelMode = mode;
+	RefreshSceneOptions();
+	RefreshSelectedSlotEditor();
+	RefreshRemoteControls();
+	RefreshSettingsPanelMode();
+	UpdateInspectorVisibility(true);
+	RefreshSelectionHighlights();
+}
+
+void SwitcherWorkspaceDock::HideSettingsPanel()
+{
+	settingsPanelMode = SettingsPanelMode::Workspace;
+	UpdateInspectorVisibility(false);
+	RefreshSelectionHighlights();
+}
+
+void SwitcherWorkspaceDock::ApplyTheme()
+{
+	if (applyingTheme)
+		return;
+
+	QScopedValueRollback<bool> themeGuard(applyingTheme, true);
+
+	const QPalette pal = palette();
+	const QColor window = pal.color(QPalette::Window);
+	const QColor base = pal.color(QPalette::Base);
+	const QColor alternate = pal.color(QPalette::AlternateBase);
+	const QColor button = pal.color(QPalette::Button);
+	const QColor text = pal.color(QPalette::Text);
+	const QColor buttonText = pal.color(QPalette::ButtonText);
+	const QColor windowText = pal.color(QPalette::WindowText);
+	const QColor disabledText = pal.color(QPalette::Disabled, QPalette::Text);
+	const QColor mid = pal.color(QPalette::Mid);
+	const QColor highlight = pal.color(QPalette::Highlight);
+
+	const QColor rootBackground = Blend(window, base, 0.08);
+	const QColor slotBackground = Blend(base, window, 0.18);
+	const QColor slotBorder = WithAlpha(mid, 110);
+	const QColor mutedText = WithAlpha(disabledText.isValid() ? disabledText : text, 220);
+	const QColor slotChipBackground = Blend(slotBackground, window, 0.22);
+	const QColor slotChipBorder = WithAlpha(mid, 148);
+	const QColor slotChipText = WithAlpha(windowText, 235);
+	const QColor hoverFill = WithAlpha(highlight, 28);
+	const QColor hoverBorder = WithAlpha(highlight, 128);
+	const QColor selectedFill = WithAlpha(highlight, 42);
+	const QColor selectedBorder = WithAlpha(highlight, 220);
+	const QColor popupBackground = Blend(window, base, 0.28);
+	const QColor popupCardBackground = Blend(popupBackground, alternate, 0.08);
+	const QColor popupFieldBackground = Blend(base, alternate, 0.18);
+	const QColor popupBorder = WithAlpha(mid, 128);
+	const QColor popupButtonHover = Blend(button, highlight, 0.16);
+	const QColor popupButtonPressed = Blend(button, highlight, 0.24);
+
+	QString styleSheet = QStringLiteral(
+		"#switcherWorkspaceRoot {"
+		"  background-color: @ROOT@;"
+		"}"
+		"#switcherWorkspaceSlot {"
+		"  background-color: @SLOT_BG@;"
+		"  border: 1px solid @SLOT_BORDER@;"
+		"  border-radius: 12px;"
+		"}"
+		"#switcherWorkspaceSlotEmpty {"
+		"  color: @MUTED_TEXT@;"
+		"  font-size: 15px;"
+		"  font-weight: 600;"
+		"}"
+		"#switcherWorkspaceSlotTitle {"
+		"  background-color: @CHIP_BG@;"
+		"  color: @CHIP_TEXT@;"
+		"  border: 1px solid @CHIP_BORDER@;"
+		"  border-radius: 10px;"
+		"  padding: 0 10px;"
+		"  font-size: 11px;"
+		"  font-weight: 600;"
+		"}"
+		"#switcherWorkspaceSlotTitle[selected=\"true\"] {"
+		"  background-color: @SELECT_FILL@;"
+		"  border-color: @SELECT_BORDER@;"
+		"}"
+		"#switcherWorkspaceInspector {"
+		"  background-color: @PANEL_BG@;"
+		"  border-left: 1px solid @PANEL_BORDER@;"
+		"}"
+		"#switcherWorkspaceInspectorHeader {"
+		"  background-color: @PANEL_BG@;"
+		"  border-bottom: 1px solid @PANEL_BORDER@;"
+		"}"
+		"#switcherWorkspaceInspector QLabel,"
+		"#switcherWorkspaceInspector QCheckBox {"
+		"  color: @WINDOW_TEXT@;"
+		"}"
+		"#switcherWorkspaceSettingsTitle,"
+		"#switcherWorkspaceSettingsSectionTitle {"
+		"  color: @WINDOW_TEXT@;"
+		"  font-weight: 700;"
+		"}"
+		"#switcherWorkspaceSettingsTitle {"
+		"  font-size: 16px;"
+		"}"
+		"#switcherWorkspaceSettingsSectionTitle {"
+		"  font-size: 11px;"
+		"}"
+		"#switcherWorkspaceInspector QListWidget,"
+		"#switcherWorkspaceInspector QComboBox,"
+		"#switcherWorkspaceInspector QLineEdit {"
+		"  background-color: @FIELD_BG@;"
+		"  color: @FIELD_TEXT@;"
+		"  border: 1px solid @PANEL_BORDER@;"
+		"  border-radius: 8px;"
+		"  padding: 8px 10px;"
+		"}"
+		"#switcherWorkspaceInspector QListWidget {"
+		"  outline: none;"
+		"  background-color: @CARD_BG@;"
+		"}"
+		"#switcherWorkspaceInspector QListWidget::item {"
+		"  border-radius: 8px;"
+		"  padding: 8px 10px;"
+		"}"
+		"#switcherWorkspaceInspector QListWidget::item:selected {"
+		"  background-color: @SELECT_FILL@;"
+		"  color: @FIELD_TEXT@;"
+		"}"
+			"#switcherWorkspaceInspector QPushButton,"
+			"#switcherWorkspaceInspector QToolButton {"
+			"  background-color: @BUTTON_BG@;"
+			"  color: @BUTTON_TEXT@;"
+			"  border: 1px solid @PANEL_BORDER@;"
+			"  border-radius: 10px;"
+			"  padding: 8px 12px;"
+			"  font-weight: 600;"
+			"}"
+			"#switcherWorkspaceInspector QPushButton:hover,"
+			"#switcherWorkspaceInspector QToolButton:hover {"
+			"  background-color: @BUTTON_HOVER@;"
+			"  border-color: @HOVER_BORDER@;"
+			"}"
+			"#switcherWorkspaceInspector QPushButton:pressed,"
+			"#switcherWorkspaceInspector QToolButton:pressed {"
+			"  background-color: @BUTTON_PRESSED@;"
+			"}"
+			"#switcherWorkspaceInspectorCloseButton {"
+			"  padding: 0px;"
+			"  min-width: 32px;"
+			"  max-width: 32px;"
+		"}");
+
+	styleSheet.replace(QStringLiteral("@ROOT@"), CssColor(rootBackground));
+	styleSheet.replace(QStringLiteral("@SLOT_BG@"), CssColor(slotBackground));
+	styleSheet.replace(QStringLiteral("@SLOT_BORDER@"), CssColor(slotBorder));
+	styleSheet.replace(QStringLiteral("@WINDOW_TEXT@"), CssColor(windowText));
+	styleSheet.replace(QStringLiteral("@MUTED_TEXT@"), CssColor(mutedText));
+	styleSheet.replace(QStringLiteral("@HOVER_FILL@"), CssColor(hoverFill));
+	styleSheet.replace(QStringLiteral("@HOVER_BORDER@"), CssColor(hoverBorder));
+	styleSheet.replace(QStringLiteral("@SELECT_FILL@"), CssColor(selectedFill));
+	styleSheet.replace(QStringLiteral("@SELECT_BORDER@"), CssColor(selectedBorder));
+	styleSheet.replace(QStringLiteral("@PANEL_BG@"), CssColor(popupBackground));
+	styleSheet.replace(QStringLiteral("@PANEL_BORDER@"), CssColor(popupBorder));
+	styleSheet.replace(QStringLiteral("@FIELD_BG@"), CssColor(popupFieldBackground));
+	styleSheet.replace(QStringLiteral("@CARD_BG@"), CssColor(popupCardBackground));
+	styleSheet.replace(QStringLiteral("@FIELD_TEXT@"), CssColor(text));
+	styleSheet.replace(QStringLiteral("@BUTTON_BG@"), CssColor(button));
+	styleSheet.replace(QStringLiteral("@BUTTON_TEXT@"), CssColor(buttonText));
+	styleSheet.replace(QStringLiteral("@BUTTON_HOVER@"), CssColor(popupButtonHover));
+	styleSheet.replace(QStringLiteral("@BUTTON_PRESSED@"), CssColor(popupButtonPressed));
+	styleSheet.replace(QStringLiteral("@CHIP_BG@"), CssColor(slotChipBackground));
+	styleSheet.replace(QStringLiteral("@CHIP_TEXT@"), CssColor(slotChipText));
+	styleSheet.replace(QStringLiteral("@CHIP_BORDER@"), CssColor(slotChipBorder));
+
+	if (appliedThemeStyleSheet != styleSheet) {
+		appliedThemeStyleSheet = styleSheet;
+		setStyleSheet(styleSheet);
+	}
 }
 
 OBSSource SwitcherWorkspaceDock::SlotSource(int index) const

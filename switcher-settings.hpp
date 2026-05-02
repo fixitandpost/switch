@@ -15,7 +15,6 @@ class SwitcherSettingsDialog : public QDialog {
 	QGridLayout *mainLayout;
 	QComboBox *sourceCombo;
 	QLineEdit *titleEdit;
-	QLineEdit *windowEdit;
 	QCheckBox *visibleCheckBox;
 	QCheckBox *previewCheckBox;
 	QCheckBox *volMeterCheckBox;

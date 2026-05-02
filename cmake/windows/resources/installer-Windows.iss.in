@@ -94,11 +94,14 @@ begin
         exit;
     end;
     { shift 16 bits to the right to get major version }
-    ObsMajorVersion := ObsMS shr 16; 
+    ObsMajorVersion := ObsMS shr 16;
     { select only low 16 bits }
     ObsMinorVersion := ObsMS and $FFFF;
-    if ObsMajorVersion < 31 then begin
-        MsgBox('Version of OBS Studio (bin\64bit\obs64.exe) is lower than the version 31 required.', mbError, MB_OK);
+    { revision is stored in the high 16 bits of LS }
+    if ((ObsMajorVersion < 32) or
+        ((ObsMajorVersion = 32) and (ObsMinorVersion < 1)) or
+        ((ObsMajorVersion = 32) and (ObsMinorVersion = 1) and ((ObsLS shr 16) < 2))) then begin
+        MsgBox('Version of OBS Studio (bin\64bit\obs64.exe) is lower than the required version 32.1.2.', mbError, MB_OK);
         Result := False;
         exit;
     end;

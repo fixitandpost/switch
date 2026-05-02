@@ -29,7 +29,7 @@ class SurfaceEventFilter : public QObject {
 	int mTimerId;
 
 public:
-	SurfaceEventFilter(OBSQTDisplay *src) : display(src), mTimerId(0) {}
+	SurfaceEventFilter(OBSQTDisplay *src) : QObject(src), display(src), mTimerId(0) {}
 
 protected:
 	bool eventFilter(QObject *obj, QEvent *event) override
@@ -43,6 +43,7 @@ protected:
 
 			switch (surfaceEvent->surfaceEventType()) {
 			case QPlatformSurfaceEvent::SurfaceCreated:
+				display->MarkSurfaceCreated();
 				if (display->windowHandle()->isExposed())
 					createOBSDisplay();
 				else
@@ -125,9 +126,15 @@ OBSQTDisplay::OBSQTDisplay(QWidget *parent, Qt::WindowFlags flags) : QWidget(par
 		obs_display_resize(display, size.width(), size.height());
 	};
 
-	connect(windowHandle(), &QWindow::visibleChanged, windowVisible);
-	connect(windowHandle(), &QWindow::screenChanged, screenChanged);
+	connect(windowHandle(), &QWindow::visibleChanged, this, windowVisible);
+	connect(windowHandle(), &QWindow::screenChanged, this, screenChanged);
 
+	/*
+	 * OBS upstream only destroys the display on surface teardown. Switcher
+	 * also listens for surface creation and expose events so a recreated native
+	 * view on macOS/Qt can safely rebuild the OBS display without depending on
+	 * widget recreation.
+	 */
 	windowHandle()->installEventFilter(new SurfaceEventFilter(this));
 }
 
@@ -188,6 +195,9 @@ bool QTToGSWindow(QWindow *window, gs_window &gswindow)
 void OBSQTDisplay::CreateDisplay(bool force)
 {
 	if (display)
+		return;
+
+	if (destroying)
 		return;
 
 	if (!windowHandle()->isExposed() && !force)

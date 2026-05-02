@@ -36,10 +36,21 @@ To stage an install somewhere else for inspection, override the prefix:
 
 `cmake --install build_macos --config RelWithDebInfo --prefix "$PWD/release/RelWithDebInfo"`
 
+## Compatibility
+
+| Target | Version |
+| --- | --- |
+| Minimum supported OBS Studio | `32.1.2` |
+| Build baseline | `32.1.2` development headers |
+| OBS dependency bundles | `2025-08-23` official `obs-deps` / Qt6 packages |
+
+Switcher is built for the OBS `32.x` UI and runtime model. OBS versions older
+than `32.1.2` are unsupported.
+
 ## Notes
 
-- Local builds are pinned to OBS Studio `31.1.1` development headers and the
-  matching official `obs-deps` bundles defined in `buildspec.json`.
+- Local builds use the official OBS Studio `32.1.2` development headers and the
+  matching dependency versions defined in `buildspec.json`.
 - If you want to use a non-default plugin location while testing, OBS also
   supports `OBS_PLUGINS_PATH` and `OBS_PLUGINS_DATA_PATH`.
 
