@@ -12,11 +12,12 @@ add_library(${CMAKE_PROJECT_NAME} MODULE)
 
 find_package(libobs REQUIRED)
 find_package(obs-frontend-api REQUIRED)
+find_package(SIMDe REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network)
 
 target_link_libraries(
   ${CMAKE_PROJECT_NAME}
-  PRIVATE OBS::libobs OBS::obs-frontend-api Qt6::Core Qt6::Widgets Qt6::Network
+  PRIVATE OBS::libobs OBS::obs-frontend-api SIMDe::SIMDe Qt6::Core Qt6::Widgets Qt6::Network
 )
 
 if(OS_LINUX OR OS_FREEBSD OR OS_OPENBSD)

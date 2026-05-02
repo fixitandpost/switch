@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QColor>
 #include <QWidget>
 #include <obs.hpp>
 
@@ -11,6 +12,7 @@ class OBSQTDisplay : public QWidget {
 		QColor displayBackgroundColor MEMBER backgroundColor READ GetDisplayBackgroundColor WRITE SetDisplayBackgroundColor)
 
 	OBSDisplay display;
+	bool destroying = false;
 
 	virtual void paintEvent(QPaintEvent *event) override;
 	virtual void moveEvent(QMoveEvent *event) override;
@@ -38,9 +40,16 @@ public:
 	QColor GetDisplayBackgroundColor() const;
 	void SetDisplayBackgroundColor(const QColor &color);
 	void UpdateDisplayBackgroundColor();
+	void MarkSurfaceCreated() { destroying = false; }
 	void CreateDisplay(bool force = false);
-	void DestroyDisplay() { display = nullptr; };
+	void DestroyDisplay()
+	{
+		display = nullptr;
+		destroying = true;
+	};
 
 	void OnMove();
 	void OnDisplayChange();
+
+private:
 };

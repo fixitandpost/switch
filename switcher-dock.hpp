@@ -2,7 +2,9 @@
 
 #include <qboxlayout.h>
 #include <QCheckBox>
+#include <QContextMenuEvent>
 #include <QDockWidget>
+#include <QPointer>
 #include <QSlider>
 #include <QPlainTextEdit>
 #include <QScrollArea>
@@ -72,6 +74,27 @@ protected:
 	virtual void wheelEvent(QWheelEvent *event) override;
 };
 
+class QMainWindow;
+
+struct SwitcherDockRegistrationOptions {
+	bool selected = false;
+	QString dockId;
+	bool preview = false;
+	bool volMeter = false;
+	bool volControls = false;
+	bool mediaControls = false;
+	bool switchScene = false;
+	bool showActive = false;
+	bool properties = false;
+	bool filters = false;
+	bool textInput = false;
+	bool sceneItems = false;
+	bool visible = true;
+	bool applyPlacement = false;
+	Qt::DockWidgetArea dockArea = Qt::LeftDockWidgetArea;
+	bool floating = false;
+};
+
 class SwitcherDock : public QSplitter {
 	Q_OBJECT
 
@@ -84,10 +107,17 @@ private:
 	float scrollY = 0.5f;
 	int scrollingFromX = 0;
 	int scrollingFromY = 0;
+	int lastMouseX = 0;
+	int lastMouseY = 0;
+	bool hasLastMousePosition = false;
 	bool selected;
+	bool workspaceContextMenuEnabled = false;
+	QPointer<QDockWidget> wrapperDockWidget = nullptr;
+	bool wrapperDockVisible = true;
 
 	OBSQTDisplay *preview = nullptr;
-	bool previewShowing = false;
+	bool previewConfigured = false;
+	bool previewActive = false;
 	VolumeMeter *volMeter = nullptr;
 	QWidget *volMeterWidget = nullptr;
 	obs_volmeter_t *obs_volmeter = nullptr;
@@ -114,6 +144,10 @@ private:
 	OBSSignal removeSignal;
 	OBSSignal reorderSignal;
 	OBSSignal refreshSignal;
+	OBSSignal muteSignal;
+	OBSSignal volumeSignal;
+	OBSSignal activateSignal;
+	OBSSignal deactivateSignal;
 
 	static void DrawPreview(void *data, uint32_t cx, uint32_t cy);
 
@@ -127,12 +161,20 @@ private:
 	bool GetSourceRelativeXY(int mouseX, int mouseY, int &x, int &y);
 
 	bool HandleMouseClickEvent(QMouseEvent *event);
+	bool HandleContextMenuEvent(QContextMenuEvent *event);
 	bool HandleMouseMoveEvent(QMouseEvent *event);
+	bool HandleMouseBoundaryEvent(QEvent *event);
 	bool HandleMouseWheelEvent(QWheelEvent *event);
 	bool HandleFocusEvent(QFocusEvent *event);
 	bool HandleKeyEvent(QKeyEvent *event);
 
 	OBSEventFilter *BuildEventFilter();
+	bool ShouldActivatePreview() const;
+	void ActivatePreview();
+	void DeactivatePreview();
+	void UpdatePreviewLifecycle();
+	void UpdateVolumeSignals();
+	void UpdateActiveSignals();
 
 private slots:
 	void LockVolumeControl(bool lock);
@@ -144,11 +186,29 @@ private slots:
 	void VisibilityChanged(int id);
 	void RefreshItems();
 	void SetActive(int active);
+	void DockWidgetVisibilityChanged(bool visible);
+
+signals:
+	void ContextMenuRequested(const QPoint &globalPos);
 
 public:
 	SwitcherDock(QString name, bool selected, QWidget *parent = nullptr);
 	~SwitcherDock();
+	static QString CreateDockId();
+	void SetDockId(const QString &id);
+	QString DockId() const { return objectName(); }
+	QDockWidget *ParentDockWidget() const;
+	QMainWindow *OwningMainWindow() const;
+	void BindDockWidgetLifecycle(QDockWidget *dockWidget);
+	void SetWorkspaceContextMenuEnabled(bool enabled) { workspaceContextMenuEnabled = enabled; }
 
+protected:
+	void changeEvent(QEvent *event) override;
+	bool event(QEvent *event) override;
+	void showEvent(QShowEvent *event) override;
+	void hideEvent(QHideEvent *event) override;
+
+public:
 	void SetSource(const OBSSource source_);
 	OBSSource GetSource();
 
@@ -217,4 +277,6 @@ public:
 };
 
 inline std::list<SwitcherDock *> switcher_docks;
-inline std::list<QMainWindow *> switcher_windows;
+
+SwitcherDock *CreateRegisteredSwitcherDock(const QString &title, const OBSSource &source, QMainWindow *mainWindow,
+					   const SwitcherDockRegistrationOptions &options);

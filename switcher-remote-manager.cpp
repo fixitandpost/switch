@@ -24,6 +24,9 @@ constexpr auto kRemoteHelperRelativePath = "remote/switcher-remote-helper.exe";
 #else
 constexpr auto kRemoteHelperRelativePath = "remote/switcher-remote-helper";
 #endif
+constexpr qint64 kRemoteSocketHighWaterMarkBytes = 4 * 1024 * 1024;
+constexpr qint64 kRemoteSocketLowWaterMarkBytes = 1 * 1024 * 1024;
+constexpr auto kRemoteBackpressureDetail = "Remote helper is backlogged, dropping frames";
 
 struct SourceTreeSearch {
 	obs_source_t *target = nullptr;
@@ -342,6 +345,22 @@ void SwitcherRemoteManager::RenderAndSendFrame()
 {
 	if (!enabled || !socket || !workspace)
 		return;
+	if (socket->state() != QAbstractSocket::ConnectedState)
+		return;
+
+	const qint64 queuedBytes = socket->bytesToWrite();
+	if (queuedBytes >= kRemoteSocketHighWaterMarkBytes) {
+		if (!frameBackpressureActive) {
+			frameBackpressureActive = true;
+			UpdateStatus(Status::Running, QString::fromLatin1(kRemoteBackpressureDetail));
+		}
+		return;
+	}
+
+	if (frameBackpressureActive && queuedBytes <= kRemoteSocketLowWaterMarkBytes) {
+		frameBackpressureActive = false;
+		UpdateStatus(Status::Running, QStringLiteral("Remote available at %1").arg(Url()));
+	}
 
 	std::vector<SwitcherRemoteRenderSlot> renderSlots;
 	const int visibleSlots = workspace->VisibleSlotCount();
@@ -397,6 +416,7 @@ void SwitcherRemoteManager::AcceptHelperConnection()
 	connect(socket, &QTcpSocket::readyRead, this, &SwitcherRemoteManager::ReadHelperMessage);
 	connect(socket, &QTcpSocket::disconnected, this, &SwitcherRemoteManager::HelperDisconnected);
 
+	frameBackpressureActive = false;
 	UpdateStatus(Status::Running, QStringLiteral("Remote available at %1").arg(Url()));
 	UpdateRenderTimer();
 	SendStateSnapshot();
@@ -439,6 +459,7 @@ void SwitcherRemoteManager::HelperDisconnected()
 		socket = nullptr;
 	}
 
+	frameBackpressureActive = false;
 	UpdateRenderTimer();
 	if (enabled && helperProcess && helperProcess->state() != QProcess::NotRunning)
 		UpdateStatus(Status::Starting, QStringLiteral("Remote helper disconnected, waiting for reconnect"));
@@ -565,6 +586,7 @@ void SwitcherRemoteManager::StopHelper(bool keepEnabled)
 {
 	helperStopRequested = true;
 	renderTimer->stop();
+	frameBackpressureActive = false;
 
 	if (socket) {
 		socket->disconnect(this);
@@ -623,6 +645,25 @@ void SwitcherRemoteManager::SendMessage(const QJsonObject &message, const QByteA
 {
 	if (!socket)
 		return;
+	if (socket->state() != QAbstractSocket::ConnectedState)
+		return;
+
+	const QString type = message.value(QStringLiteral("type")).toString();
+	const bool isFrameMessage = type == QLatin1String("frame");
+	const qint64 queuedBytes = socket->bytesToWrite();
+
+	if (isFrameMessage && queuedBytes >= kRemoteSocketHighWaterMarkBytes) {
+		if (!frameBackpressureActive) {
+			frameBackpressureActive = true;
+			UpdateStatus(Status::Running, QString::fromLatin1(kRemoteBackpressureDetail));
+		}
+		return;
+	}
+
+	if (frameBackpressureActive && queuedBytes <= kRemoteSocketLowWaterMarkBytes) {
+		frameBackpressureActive = false;
+		UpdateStatus(Status::Running, QStringLiteral("Remote available at %1").arg(Url()));
+	}
 
 	const QByteArray json = QJsonDocument(message).toJson(QJsonDocument::Compact);
 	QByteArray packet;
