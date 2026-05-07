@@ -20,9 +20,9 @@
 
 namespace {
 #ifdef _WIN32
-constexpr auto kRemoteHelperRelativePath = "remote/switcher-remote-helper.exe";
+constexpr auto kRemoteHelperRelativePath = "remote/switch-remote-helper.exe";
 #else
-constexpr auto kRemoteHelperRelativePath = "remote/switcher-remote-helper";
+constexpr auto kRemoteHelperRelativePath = "remote/switch-remote-helper";
 #endif
 constexpr qint64 kRemoteSocketHighWaterMarkBytes = 4 * 1024 * 1024;
 constexpr qint64 kRemoteSocketLowWaterMarkBytes = 1 * 1024 * 1024;
@@ -49,7 +49,7 @@ QString GenerateRemoteToken()
 {
 	char *uuid = os_generate_uuid();
 	if (!uuid)
-		return QStringLiteral("switcher");
+		return QStringLiteral("switch");
 
 	QString token = QString::fromUtf8(uuid);
 	bfree(uuid);
@@ -63,7 +63,7 @@ void LogHelperOutput(const QByteArray &data, int level)
 	for (const auto &line : lines) {
 		const QByteArray trimmed = line.trimmed();
 		if (!trimmed.isEmpty())
-			blog(level, "[Switcher Remote] %s", trimmed.constData());
+			blog(level, "[Switch Remote] %s", trimmed.constData());
 	}
 }
 } // namespace

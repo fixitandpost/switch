@@ -1,11 +1,11 @@
-# Switcher
+# Switch
 
-Switcher is an OBS Studio plugin from Fix It & Post that combines a
+Switch is an OBS Studio plugin from Fix It & Post that combines a
 multiview-style scene switcher with detachable source control docks.
 
 ## What It Does
 
-- Opens a Switcher workspace from the OBS `Tools` menu
+- Opens a Switch workspace from the OBS `Tools` menu
 - Shows 4, 9, 16, or 25 scene views in a multiview-style layout
 - Lets you switch scenes directly from the grid
 - Supports detached docks for per-source preview, media controls, audio
@@ -44,7 +44,7 @@ To stage an install somewhere else for inspection, override the prefix:
 | Build baseline | `32.1.2` development headers |
 | OBS dependency bundles | `2025-08-23` official `obs-deps` / Qt6 packages |
 
-Switcher is built for the OBS `32.x` UI and runtime model. OBS versions older
+Switch is built for the OBS `32.x` UI and runtime model. OBS versions older
 than `32.1.2` are unsupported.
 
 ## Notes
@@ -58,7 +58,7 @@ than `32.1.2` are unsupported.
 
 Fix It & Post
 
-Repository: [github.com/fixitandpost/switcher](https://github.com/fixitandpost/switcher)
+Repository: [github.com/fixitandpost/switch](https://github.com/fixitandpost/switch)
 
 ## References
 

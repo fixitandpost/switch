@@ -375,226 +375,80 @@ const indexHTML = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Switcher Remote</title>
+  <title>Switch Remote</title>
   <style>
     :root {
       color-scheme: dark;
-      --bg: #020617;
-      --panel: rgba(15, 23, 42, 0.92);
-      --border: rgba(148, 163, 184, 0.24);
-      --text: #f8fafc;
-      --muted: #94a3b8;
-      --green: #22c55e;
-      --red: #ef4444;
-      --orange: #f97316;
-      --white: #f8fafc;
+      --bg: #1f2129;
+      --press: rgba(248, 250, 252, 0.05);
     }
     * { box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
     body {
       margin: 0;
-      min-height: 100vh;
-      background:
-        radial-gradient(circle at top left, rgba(34, 197, 94, 0.18), transparent 28%),
-        radial-gradient(circle at top right, rgba(239, 68, 68, 0.18), transparent 24%),
-        linear-gradient(180deg, #020617 0%, #0f172a 100%);
-      color: var(--text);
-      font: 500 15px/1.4 "SF Pro Display", "Segoe UI", sans-serif;
-    }
-    .shell {
-      width: min(1480px, calc(100vw - 32px));
-      margin: 0 auto;
-      padding: 20px 0 32px;
-    }
-    .toolbar {
+      min-height: 100dvh;
+      background: var(--bg);
       display: grid;
-      grid-template-columns: 1fr auto;
-      gap: 16px;
-      align-items: center;
-      padding: 16px 18px;
-      border: 1px solid var(--border);
-      border-radius: 20px;
-      background: var(--panel);
-      backdrop-filter: blur(18px);
-      box-shadow: 0 18px 54px rgba(2, 6, 23, 0.42);
+      place-items: center;
+      font: 500 15px/1.4 "SF Pro Display", "Segoe UI", sans-serif;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
     }
-    .headline {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px 18px;
-      align-items: baseline;
-    }
-    .headline h1 {
-      margin: 0;
-      font-size: clamp(20px, 2.5vw, 32px);
-      letter-spacing: -0.03em;
-    }
-    .meta {
-      color: var(--muted);
-      font-size: 13px;
-      display: flex;
-      gap: 12px;
-      flex-wrap: wrap;
-    }
-    .actions {
-      display: flex;
-      gap: 10px;
-      align-items: center;
-      flex-wrap: wrap;
-      justify-content: flex-end;
-    }
-    button {
-      border: 1px solid transparent;
-      border-radius: 999px;
-      padding: 12px 18px;
-      font: inherit;
-      font-weight: 700;
-      color: var(--text);
-      cursor: pointer;
-      transition: transform 120ms ease, opacity 120ms ease, border-color 120ms ease;
-    }
-    button:disabled {
-      opacity: 0.45;
-      cursor: not-allowed;
-      transform: none;
-    }
-    button:hover:not(:disabled) {
-      transform: translateY(-1px);
-    }
-    .cut { background: linear-gradient(135deg, #ef4444, #b91c1c); }
-    .auto { background: linear-gradient(135deg, #22c55e, #166534); }
-    .ghost {
-      background: transparent;
-      border-color: var(--border);
-    }
-    .stage-card {
-      margin-top: 18px;
-      border: 1px solid var(--border);
-      border-radius: 24px;
+    .viewport {
+      width: 100vw;
+      height: 100dvh;
+      display: grid;
+      place-items: center;
       overflow: hidden;
-      background: rgba(2, 6, 23, 0.92);
-      box-shadow: 0 18px 54px rgba(2, 6, 23, 0.42);
+      background: var(--bg);
     }
     .stage {
       position: relative;
-      aspect-ratio: 16 / 9;
-      background: #020617;
+      width: min(100vw, calc(100dvh * 16 / 9));
+      height: min(100dvh, calc(100vw * 9 / 16));
+      background: var(--bg);
     }
     .stage img {
       display: block;
       width: 100%;
       height: 100%;
-      object-fit: cover;
-      background: #020617;
+      object-fit: fill;
+      background: var(--bg);
     }
     .overlay {
       position: absolute;
       inset: 0;
-      pointer-events: none;
-    }
-    .tile-button {
-      position: absolute;
       pointer-events: auto;
-      border-radius: 16px;
+    }
+    .tile-hitbox {
+      position: absolute;
+      margin: 0;
+      padding: 0;
       background: transparent;
-      border: 2px solid rgba(148, 163, 184, 0.18);
-      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.02);
+      border: 0;
+      border-radius: 0;
+      cursor: pointer;
+      appearance: none;
+      touch-action: manipulation;
     }
-    .tile-button.selected { border-color: var(--white); }
-    .tile-button.preview { border-color: var(--green); }
-    .tile-button.program { border-color: var(--red); }
-    .tile-button.program.preview { border-color: var(--orange); }
-    .tile-button.empty { cursor: default; }
-    .status-strip {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 0;
-      border-top: 1px solid var(--border);
-      background: rgba(15, 23, 42, 0.92);
+    .tile-hitbox:disabled {
+      cursor: default;
     }
-    .status-item {
-      padding: 14px 18px;
-      border-right: 1px solid var(--border);
-    }
-    .status-item:last-child { border-right: none; }
-    .status-item strong {
-      display: block;
-      margin-bottom: 2px;
-      font-size: 12px;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--muted);
-    }
-    .status-item span {
-      display: block;
-      font-size: 15px;
-      word-break: break-word;
-    }
-    .empty {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 100vh;
-      color: var(--muted);
-    }
-    @media (max-width: 900px) {
-      .toolbar {
-        grid-template-columns: 1fr;
-      }
-      .actions {
-        justify-content: stretch;
-      }
-      .actions button {
-        flex: 1;
-      }
-      .status-strip {
-        grid-template-columns: 1fr;
-      }
-      .status-item {
-        border-right: none;
-        border-bottom: 1px solid var(--border);
-      }
-      .status-item:last-child {
-        border-bottom: none;
-      }
+    .tile-hitbox:active:not(:disabled) {
+      background: var(--press);
     }
   </style>
 </head>
 <body>
-  <div class="shell">
-    <div class="toolbar">
-      <div class="headline">
-        <h1>Switcher Remote</h1>
-        <div class="meta">
-          <span id="connection">Connecting...</span>
-          <span id="transition">Transition: --</span>
-          <span id="mode">Mode: --</span>
-        </div>
-      </div>
-      <div class="actions">
-        <button class="ghost" id="refresh">Reconnect</button>
-        <button class="cut" id="cut">CUT</button>
-        <button class="auto" id="auto">AUTO</button>
-      </div>
-    </div>
-    <div class="stage-card">
-      <div class="stage">
-        <img id="feed" alt="Switcher remote feed">
-        <div id="overlay" class="overlay"></div>
-      </div>
-      <div class="status-strip">
-        <div class="status-item">
-          <strong>Status</strong>
-          <span id="status">Waiting for state…</span>
-        </div>
-        <div class="status-item">
-          <strong>Selection</strong>
-          <span id="selection">None</span>
-        </div>
-        <div class="status-item">
-          <strong>Program</strong>
-          <span id="program">None</span>
-        </div>
-      </div>
+  <div class="viewport">
+    <div class="stage">
+      <img id="feed" alt="Switch remote feed">
+      <div id="overlay" class="overlay"></div>
     </div>
   </div>
   <script>
@@ -602,18 +456,10 @@ const indexHTML = `<!doctype html>
     const token = params.get('token') || '';
     const feed = document.getElementById('feed');
     const overlay = document.getElementById('overlay');
-    const cutButton = document.getElementById('cut');
-    const autoButton = document.getElementById('auto');
-    const reconnectButton = document.getElementById('refresh');
-    const statusEl = document.getElementById('status');
-    const selectionEl = document.getElementById('selection');
-    const programEl = document.getElementById('program');
-    const connectionEl = document.getElementById('connection');
-    const transitionEl = document.getElementById('transition');
-    const modeEl = document.getElementById('mode');
 
     let currentState = null;
     let eventSource = null;
+    let reconnectTimer = null;
 
     function command(command, extra = {}) {
       return fetch('/api/command?token=' + encodeURIComponent(token), {
@@ -623,21 +469,32 @@ const indexHTML = `<!doctype html>
       });
     }
 
-    function slotText(slotIndex) {
-      if (!currentState || slotIndex == null || slotIndex < 0) return 'None';
-      const slot = (currentState.slots || []).find((entry) => entry.index === slotIndex);
-      return slot ? slot.title : 'None';
+    function refreshFeed(cacheBust = false) {
+      const suffix = cacheBust ? ('&t=' + Date.now()) : '';
+      feed.src = '/feed.mjpg?token=' + encodeURIComponent(token) + suffix;
+    }
+
+    function scheduleReconnect() {
+      if (reconnectTimer) return;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        restartStreams(true);
+      }, 1500);
+    }
+
+    function activateSlot(slot) {
+      if (!currentState || !currentState.enabled || !slot || !slot.hasSource) return;
+
+      if (currentState.selectedSlotIndex === slot.index) {
+        command('cut');
+        return;
+      }
+
+      command('select_preview_slot', { slotIndex: slot.index });
     }
 
     function renderState(state) {
       currentState = state;
-      statusEl.textContent = state.status || 'Remote unavailable';
-      selectionEl.textContent = slotText(state.selectedSlotIndex);
-      programEl.textContent = slotText(state.programSlotIndex);
-      transitionEl.textContent = 'Transition: ' + (state.transitionDurationMs ?? '--') + ' ms';
-      modeEl.textContent = 'Mode: ' + (state.previewProgramMode ? 'Studio' : 'Direct');
-      cutButton.disabled = !state.enabled || state.selectedSlotIndex == null || state.selectedSlotIndex < 0;
-      autoButton.disabled = !state.enabled || state.selectedSlotIndex == null || state.selectedSlotIndex < 0;
       overlay.replaceChildren();
 
       for (const slot of state.slots || []) {
@@ -645,46 +502,41 @@ const indexHTML = `<!doctype html>
         if (!rect) continue;
         const button = document.createElement('button');
         button.type = 'button';
-        button.className = 'tile-button' +
-          (slot.selected ? ' selected' : '') +
-          (slot.preview ? ' preview' : '') +
-          (slot.program ? ' program' : '') +
-          (!slot.hasSource ? ' empty' : '');
+        button.className = 'tile-hitbox';
         button.style.left = (rect.x * 100) + '%';
         button.style.top = (rect.y * 100) + '%';
         button.style.width = (rect.width * 100) + '%';
         button.style.height = (rect.height * 100) + '%';
         button.title = slot.title || ('Slot ' + (slot.index + 1));
-        button.disabled = !slot.hasSource;
-        if (slot.hasSource) {
-          button.addEventListener('click', () => command('select_preview_slot', { slotIndex: slot.index }));
-        }
+        button.ariaLabel = slot.title || ('Slot ' + (slot.index + 1));
+        button.disabled = !state.enabled || !slot.hasSource;
+        button.addEventListener('click', () => activateSlot(slot));
         overlay.appendChild(button);
       }
     }
 
     function connectEvents() {
       if (eventSource) eventSource.close();
-      connectionEl.textContent = 'Connecting…';
       eventSource = new EventSource('/events?token=' + encodeURIComponent(token));
       eventSource.addEventListener('state', (event) => {
-        connectionEl.textContent = 'Connected';
         renderState(JSON.parse(event.data));
       });
       eventSource.onerror = () => {
-        connectionEl.textContent = 'Disconnected, retrying…';
+        scheduleReconnect();
       };
     }
 
-    reconnectButton.addEventListener('click', () => {
+    function restartStreams(cacheBust = false) {
       connectEvents();
-      feed.src = '/feed.mjpg?token=' + encodeURIComponent(token) + '&t=' + Date.now();
-    });
-    cutButton.addEventListener('click', () => command('cut'));
-    autoButton.addEventListener('click', () => command('auto'));
+      refreshFeed(cacheBust);
+    }
 
-    feed.src = '/feed.mjpg?token=' + encodeURIComponent(token);
-    connectEvents();
+    feed.addEventListener('error', () => scheduleReconnect());
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) restartStreams(true);
+    });
+
+    restartStreams(false);
   </script>
 </body>
 </html>`

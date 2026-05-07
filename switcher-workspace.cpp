@@ -37,6 +37,7 @@
 #include <QStackedWidget>
 #include <QStyle>
 #include <QToolButton>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWindow>
 
@@ -345,6 +346,10 @@ void SwitcherWorkspacePreview::ActivatePreview()
 	obs_source_inc_showing(source);
 	display->show();
 	display->CreateDisplay();
+	QTimer::singleShot(0, this, [this]() {
+		if (previewActive && display)
+			display->CreateDisplay(true);
+	});
 }
 
 void SwitcherWorkspacePreview::DeactivatePreview()

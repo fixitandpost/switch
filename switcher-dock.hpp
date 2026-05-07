@@ -169,6 +169,7 @@ private:
 	bool HandleKeyEvent(QKeyEvent *event);
 
 	OBSEventFilter *BuildEventFilter();
+	void ApplyDockWidgetFeatures(QDockWidget *dockWidget);
 	bool ShouldActivatePreview() const;
 	void ActivatePreview();
 	void DeactivatePreview();

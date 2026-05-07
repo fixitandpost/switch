@@ -33,14 +33,14 @@
     },
     "platformConfig": {
         "macos": {
-            "bundleId": "com.fixitandpost.switcher"
+            "bundleId": "com.fixitandpost.switch"
         }
     },
-    "name": "switcher",
-    "displayName": "Switcher",
+    "name": "switch",
+    "displayName": "Switch",
     "version": "0.5.1",
     "author": "Fix It & Post",
-    "website": "https://github.com/fixitandpost/switcher",
+    "website": "https://github.com/fixitandpost/switch",
     "email": "",
     "uuids": {
         "windowsApp": "B03BEF5F-1366-42F4-92EF-C5BC8C4FB9AA"

@@ -18,8 +18,10 @@
 #include <QEvent>
 #include <QHideEvent>
 #include <QPalette>
+#include <QTimer>
 #include <QShowEvent>
 #include <QUuid>
+#include <QAbstractButton>
 
 #include <algorithm>
 
@@ -53,11 +55,11 @@
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_AUTHOR("Fix It & Post");
-OBS_MODULE_USE_DEFAULT_LOCALE("switcher", "en-US")
+OBS_MODULE_USE_DEFAULT_LOCALE("switch", "en-US")
 
 namespace {
-constexpr auto kSwitcherStateKey = "switcher";
-constexpr auto kSwitcherWorkspaceDockId = "switcher-workspace";
+constexpr auto kSwitcherStateKey = "switch";
+constexpr auto kSwitcherWorkspaceDockId = "switch-workspace";
 constexpr int kMinimumObsMajor = 32;
 constexpr int kMinimumObsMinor = 1;
 constexpr int kMinimumObsPatch = 2;
@@ -77,7 +79,7 @@ const QByteArray &LegacyWorkspaceDockId()
 {
 	static const auto key =
 		QByteArrayLiteral("source") + QByteArrayLiteral("-") + QByteArrayLiteral("dock") + QByteArrayLiteral("-") +
-		QByteArrayLiteral("switcher");
+		QByteArrayLiteral("switch");
 	return key;
 }
 
@@ -310,7 +312,7 @@ static void frontend_save_load(obs_data_t *save_data, bool saving, void *)
 		for (const auto &it : switcher_docks) {
 			auto *dockWidget = it->ParentDockWidget();
 			if (!dockWidget) {
-				blog(LOG_WARNING, "[Switcher] Skipping persistence for dock '%s' without a parent QDockWidget",
+				blog(LOG_WARNING, "[Switch] Skipping persistence for dock '%s' without a parent QDockWidget",
 				     QT_TO_UTF8(it->DockId()));
 				continue;
 			}
@@ -361,7 +363,7 @@ static void frontend_save_load(obs_data_t *save_data, bool saving, void *)
 		obs_data_set_bool(obj, "corner_bl", main_window->corner(Qt::BottomLeftCorner) == Qt::LeftDockWidgetArea);
 		if (switcher_dock) {
 			obs_data_t *switcher = switcher_dock->SaveState();
-			obs_data_set_obj(obj, "switcher", switcher);
+			obs_data_set_obj(obj, "switch", switcher);
 			obs_data_release(switcher);
 		}
 		obs_data_set_obj(save_data, kSwitcherStateKey, obj);
@@ -407,7 +409,7 @@ static void frontend_save_load(obs_data_t *save_data, bool saving, void *)
 						if (title.isEmpty() && source)
 							title = QT_UTF8(obs_source_get_name(source));
 						if (title.isEmpty())
-							title = QStringLiteral("Switcher Dock %1").arg(i + 1);
+							title = QStringLiteral("Switch Dock %1").arg(i + 1);
 
 						QString dockId = QT_UTF8(obs_data_get_string(dock, "dock_id"));
 						if (dockId.isEmpty())
@@ -464,7 +466,7 @@ static void frontend_save_load(obs_data_t *save_data, bool saving, void *)
 				obs_data_array_release(docks);
 			}
 				obs_frontend_pop_ui_translation();
-			obs_data_t *switcher = obs_data_get_obj(obj, "switcher");
+			obs_data_t *switcher = obs_data_get_obj(obj, "switch");
 			if (switcher_dock)
 				switcher_dock->LoadState(switcher);
 			if (switcher)
@@ -610,12 +612,12 @@ static void source_remove(void *data, calldata_t *call_data)
 bool obs_module_load()
 {
 	if (!SupportsCurrentObsVersion()) {
-		blog(LOG_ERROR, "[Switcher] OBS Studio %d.%d.%d or newer is required. Detected %s.", kMinimumObsMajor,
+		blog(LOG_ERROR, "[Switch] OBS Studio %d.%d.%d or newer is required. Detected %s.", kMinimumObsMajor,
 		     kMinimumObsMinor, kMinimumObsPatch, obs_get_version_string());
 		return false;
 	}
 
-	blog(LOG_INFO, "[Switcher] loaded version %s", PROJECT_VERSION);
+	blog(LOG_INFO, "[Switch] loaded version %s", PROJECT_VERSION);
 
 	obs_frontend_add_save_callback(frontend_save_load, nullptr);
 	obs_frontend_add_event_callback(frontend_event, nullptr);
@@ -647,7 +649,7 @@ bool obs_module_load()
 
 void obs_module_post_load(void)
 {
-	switcher_vendor = obs_websocket_register_vendor("Switcher");
+	switcher_vendor = obs_websocket_register_vendor("Switch");
 	if (!switcher_vendor)
 		return;
 
@@ -745,9 +747,6 @@ void SwitcherDock::changeEvent(QEvent *event)
 	case QEvent::ApplicationPaletteChange:
 		ActiveChanged();
 		break;
-	case QEvent::WindowStateChange:
-		UpdatePreviewLifecycle();
-		break;
 	default:
 		break;
 	}
@@ -755,21 +754,16 @@ void SwitcherDock::changeEvent(QEvent *event)
 
 bool SwitcherDock::event(QEvent *event)
 {
-	if (event && event->type() == DockClosedEventType())
-		DeactivatePreview();
-
 	return QSplitter::event(event);
 }
 
 void SwitcherDock::showEvent(QShowEvent *event)
 {
 	QSplitter::showEvent(event);
-	UpdatePreviewLifecycle();
 }
 
 void SwitcherDock::hideEvent(QHideEvent *event)
 {
-	DeactivatePreview();
 	QSplitter::hideEvent(event);
 }
 
@@ -804,30 +798,55 @@ QMainWindow *SwitcherDock::OwningMainWindow() const
 	return nullptr;
 }
 
+void SwitcherDock::ApplyDockWidgetFeatures(QDockWidget *dockWidget)
+{
+	if (!dockWidget)
+		return;
+
+	const auto features = dockWidget->features();
+	const bool floating = dockWidget->isFloating();
+	const auto desired =
+		floating ? (features | QDockWidget::DockWidgetClosable) : (features & ~QDockWidget::DockWidgetClosable);
+	if (features != desired)
+		dockWidget->setFeatures(desired);
+
+	if (!floating) {
+		if (auto *closeButton =
+			    dockWidget->findChild<QAbstractButton *>(QStringLiteral("qt_dockwidget_closebutton"))) {
+			closeButton->hide();
+			closeButton->setEnabled(false);
+		}
+	}
+}
+
 void SwitcherDock::BindDockWidgetLifecycle(QDockWidget *dockWidget)
 {
 	if (wrapperDockWidget == dockWidget) {
 		wrapperDockVisible = !dockWidget || dockWidget->isVisible();
-		UpdatePreviewLifecycle();
+		ApplyDockWidgetFeatures(dockWidget);
 		return;
 	}
 
 	wrapperDockWidget = dockWidget;
 	wrapperDockVisible = !dockWidget || dockWidget->isVisible();
-	if (!dockWidget) {
-		UpdatePreviewLifecycle();
+	if (!dockWidget)
 		return;
-	}
 
+	ApplyDockWidgetFeatures(dockWidget);
 	connect(dockWidget, &QDockWidget::visibilityChanged, this, &SwitcherDock::DockWidgetVisibilityChanged,
 		Qt::UniqueConnection);
-	connect(dockWidget, &QDockWidget::topLevelChanged, this, [this](bool) { UpdatePreviewLifecycle(); });
+	connect(dockWidget, &QDockWidget::featuresChanged, this,
+		[this, dockWidget](QDockWidget::DockWidgetFeatures) { ApplyDockWidgetFeatures(dockWidget); },
+		Qt::UniqueConnection);
+	connect(dockWidget, &QDockWidget::topLevelChanged, this,
+		[this, dockWidget](bool) { QTimer::singleShot(0, dockWidget, [this, dockWidget]() { ApplyDockWidgetFeatures(dockWidget); }); },
+		Qt::UniqueConnection);
 	connect(dockWidget, &QObject::destroyed, this, [this]() {
 		wrapperDockWidget = nullptr;
 		wrapperDockVisible = false;
 		DeactivatePreview();
 	});
-	UpdatePreviewLifecycle();
+	QTimer::singleShot(0, dockWidget, [this, dockWidget]() { ApplyDockWidgetFeatures(dockWidget); });
 }
 
 SwitcherDock *CreateRegisteredSwitcherDock(const QString &title, const OBSSource &source, QMainWindow *mainWindow,
@@ -845,7 +864,7 @@ SwitcherDock *CreateRegisteredSwitcherDock(const QString &title, const OBSSource
 	const auto dockIdUtf8 = dockId.toUtf8();
 	const auto dockTitleUtf8 = title.toUtf8();
 	if (!obs_frontend_add_dock_by_id(dockIdUtf8.constData(), dockTitleUtf8.constData(), dock)) {
-		blog(LOG_WARNING, "[Switcher] Failed to add dock '%s' because the id was rejected", dockIdUtf8.constData());
+		blog(LOG_WARNING, "[Switch] Failed to add dock '%s' because the id was rejected", dockIdUtf8.constData());
 		delete dock;
 		return nullptr;
 	}
@@ -853,7 +872,7 @@ SwitcherDock *CreateRegisteredSwitcherDock(const QString &title, const OBSSource
 	switcher_docks.push_back(dock);
 	auto *dockWidget = dock->ParentDockWidget();
 	if (!dockWidget) {
-		blog(LOG_WARNING, "[Switcher] Failed to locate parent dock widget for dock '%s'", dockIdUtf8.constData());
+		blog(LOG_WARNING, "[Switch] Failed to locate parent dock widget for dock '%s'", dockIdUtf8.constData());
 		obs_frontend_remove_dock(dockIdUtf8.constData());
 		switcher_docks.pop_back();
 		delete dock;
@@ -1743,18 +1762,7 @@ bool SwitcherDock::HandleKeyEvent(QKeyEvent *event)
 
 bool SwitcherDock::ShouldActivatePreview() const
 {
-	if (!previewConfigured || !source || !isVisible())
-		return false;
-
-	if (auto *dockWidget = wrapperDockWidget ? wrapperDockWidget.data() : ParentDockWidget()) {
-		if (!wrapperDockVisible || !dockWidget->isVisible() || dockWidget->isHidden() || dockWidget->isMinimized())
-			return false;
-	}
-
-	if (auto *topLevel = window(); topLevel && topLevel->isMinimized())
-		return false;
-
-	return true;
+	return previewConfigured && source;
 }
 
 void SwitcherDock::ActivatePreview()
@@ -1816,6 +1824,10 @@ void SwitcherDock::ActivatePreview()
 	preview->setVisible(true);
 	preview->show();
 	preview->CreateDisplay();
+	QTimer::singleShot(0, this, [this]() {
+		if (previewActive && preview)
+			preview->CreateDisplay(true);
+	});
 }
 
 void SwitcherDock::DeactivatePreview()
@@ -1851,7 +1863,6 @@ void SwitcherDock::UpdatePreviewLifecycle()
 void SwitcherDock::DockWidgetVisibilityChanged(bool visible)
 {
 	wrapperDockVisible = visible;
-	UpdatePreviewLifecycle();
 }
 
 void SwitcherDock::EnablePreview()

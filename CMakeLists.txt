@@ -74,9 +74,9 @@ target_sources(
 find_program(GO_EXECUTABLE go REQUIRED)
 
 if(OS_WINDOWS)
-  set(SWITCHER_REMOTE_HELPER_FILENAME "switcher-remote-helper.exe")
+  set(SWITCHER_REMOTE_HELPER_FILENAME "switch-remote-helper.exe")
 else()
-  set(SWITCHER_REMOTE_HELPER_FILENAME "switcher-remote-helper")
+  set(SWITCHER_REMOTE_HELPER_FILENAME "switch-remote-helper")
 endif()
 
 set(SWITCHER_REMOTE_HELPER_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/remote/${SWITCHER_REMOTE_HELPER_FILENAME}")
@@ -87,14 +87,14 @@ add_custom_command(
   COMMAND "${GO_EXECUTABLE}" build -o "${SWITCHER_REMOTE_HELPER_OUTPUT}" .
   WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/remote-helper"
   DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/remote-helper/go.mod" "${CMAKE_CURRENT_SOURCE_DIR}/remote-helper/main.go"
-  COMMENT "Building Switcher remote helper"
+  COMMENT "Building Switch remote helper"
   VERBATIM
 )
 
 set_source_files_properties("${SWITCHER_REMOTE_HELPER_OUTPUT}" PROPERTIES GENERATED TRUE)
 
-add_custom_target(switcher-remote-helper ALL DEPENDS "${SWITCHER_REMOTE_HELPER_OUTPUT}")
-add_dependencies(${CMAKE_PROJECT_NAME} switcher-remote-helper)
+add_custom_target(switch-remote-helper ALL DEPENDS "${SWITCHER_REMOTE_HELPER_OUTPUT}")
+add_dependencies(${CMAKE_PROJECT_NAME} switch-remote-helper)
 
 if(OS_MACOS)
   target_sources(${CMAKE_PROJECT_NAME} PRIVATE "${SWITCHER_REMOTE_HELPER_OUTPUT}")
@@ -106,7 +106,7 @@ if(OS_MACOS)
     COMMAND
       "${CMAKE_COMMAND}" -E copy_if_different "${SWITCHER_REMOTE_HELPER_OUTPUT}"
       "$<TARGET_BUNDLE_DIR:${CMAKE_PROJECT_NAME}>/Contents/Resources/remote/${SWITCHER_REMOTE_HELPER_FILENAME}"
-    COMMENT "Copy Switcher remote helper into plugin bundle"
+    COMMENT "Copy Switch remote helper into plugin bundle"
     VERBATIM
   )
 elseif(OS_WINDOWS)
@@ -118,7 +118,7 @@ elseif(OS_WINDOWS)
     COMMAND
       "${CMAKE_COMMAND}" -E copy_if_different "${SWITCHER_REMOTE_HELPER_OUTPUT}"
       "${CMAKE_CURRENT_BINARY_DIR}/rundir/$<CONFIG>/${CMAKE_PROJECT_NAME}/remote/${SWITCHER_REMOTE_HELPER_FILENAME}"
-    COMMENT "Copy Switcher remote helper to rundir"
+    COMMENT "Copy Switch remote helper to rundir"
     VERBATIM
   )
 endif()

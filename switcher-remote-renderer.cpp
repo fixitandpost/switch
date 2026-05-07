@@ -11,34 +11,48 @@
 #include <obs-frontend-api.h>
 
 namespace {
-constexpr int kRemoteMargin = 18;
-constexpr int kRemoteSpacing = 14;
-constexpr int kRemoteHeaderHeight = 34;
+constexpr int kRemoteMargin = 22;
+constexpr int kRemoteSpacing = 18;
+constexpr int kRemoteTileInset = 6;
+constexpr int kRemoteTileRadius = 12;
+constexpr int kRemoteTileBorderWidth = 2;
+constexpr int kRemoteSelectedBorderWidth = 3;
+constexpr int kRemoteTitleMargin = 16;
+constexpr int kRemoteTitleHeight = 28;
+constexpr int kRemoteTitleRadius = 10;
+constexpr int kRemoteTitlePadding = 10;
 
 QColor TileBorderColor(bool program, bool preview, bool selected)
 {
 	if (program && preview)
-		return QColor(QStringLiteral("#f97316"));
+		return QColor(QStringLiteral("#f59e0b"));
 	if (program)
 		return QColor(QStringLiteral("#ef4444"));
 	if (preview)
 		return QColor(QStringLiteral("#22c55e"));
 	if (selected)
-		return QColor(QStringLiteral("#f8fafc"));
-	return QColor(QStringLiteral("#334155"));
+		return QColor(QStringLiteral("#60a5fa"));
+	return QColor(QStringLiteral("#3b4252"));
 }
 
-QColor TileLabelBackground(bool hasSource, bool program, bool preview)
+QColor TileLabelBackground(bool hasSource)
 {
 	if (!hasSource)
-		return QColor(15, 23, 42, 225);
+		return QColor(34, 37, 47, 228);
+	return QColor(28, 31, 41, 228);
+}
+
+QColor TileLabelBorder(bool program, bool preview, bool selected)
+{
 	if (program && preview)
-		return QColor(249, 115, 22, 220);
+		return QColor(245, 158, 11, 190);
 	if (program)
-		return QColor(220, 38, 38, 220);
+		return QColor(239, 68, 68, 190);
 	if (preview)
-		return QColor(22, 163, 74, 220);
-	return QColor(15, 23, 42, 210);
+		return QColor(34, 197, 94, 190);
+	if (selected)
+		return QColor(96, 165, 250, 190);
+	return QColor(90, 99, 118, 160);
 }
 
 static inline void GetScaleAndCenterPos(int baseCX, int baseCY, int windowCX, int windowCY, int &x, int &y, float &scale)
@@ -176,7 +190,7 @@ QByteArray SwitcherRemoteRenderer::RenderJpeg(const std::vector<SwitcherRemoteRe
 	}
 
 	QImage image(size, QImage::Format::Format_RGBX8888);
-	image.fill(QColor(QStringLiteral("#020617")));
+	image.fill(QColor(QStringLiteral("#1f2129")));
 
 	obs_enter_graphics();
 
@@ -203,8 +217,8 @@ QByteArray SwitcherRemoteRenderer::RenderJpeg(const std::vector<SwitcherRemoteRe
 				continue;
 
 			const auto &tile = layout[slotIndex].rect;
-			const QRect contentRect =
-				tile.adjusted(6, 6, -6, -(kRemoteHeaderHeight + 6));
+			const QRect contentRect = tile.adjusted(kRemoteTileInset, kRemoteTileInset, -kRemoteTileInset,
+							      -kRemoteTileInset);
 
 			uint32_t sourceCX = obs_source_get_width(slot.source);
 			if (sourceCX == 0)
@@ -274,42 +288,29 @@ QByteArray SwitcherRemoteRenderer::RenderJpeg(const std::vector<SwitcherRemoteRe
 		const bool selected = static_cast<int>(slotIndex) == selectedSlotIndex;
 
 		const QColor borderColor = TileBorderColor(program, preview, selected);
-		painter.setPen(QPen(borderColor, selected ? 4.0 : 3.0));
-		painter.drawRoundedRect(tile.adjusted(1, 1, -1, -1), 14, 14);
+		painter.setPen(QPen(borderColor, selected ? kRemoteSelectedBorderWidth : kRemoteTileBorderWidth));
+		painter.drawRoundedRect(tile.adjusted(1, 1, -1, -1), kRemoteTileRadius, kRemoteTileRadius);
 
-		const QRect headerRect(tile.left() + 6, tile.bottom() - (kRemoteHeaderHeight + 6), tile.width() - 12, kRemoteHeaderHeight);
-		painter.setPen(Qt::NoPen);
-		painter.setBrush(TileLabelBackground(hasSource, program, preview));
-		painter.drawRoundedRect(headerRect, 10, 10);
+		const QString title = slot.title.isEmpty() ? QStringLiteral("View %1").arg(slot.index + 1) : slot.title;
+		const int availableTitleWidth = std::max(72, tile.width() - (kRemoteTitleMargin * 2));
+		const int chipWidth = std::clamp(painter.fontMetrics().horizontalAdvance(title) + (kRemoteTitlePadding * 2), 72,
+						 availableTitleWidth);
+		const QRect chipRect(tile.left() + kRemoteTitleMargin, tile.top() + kRemoteTitleMargin, chipWidth,
+				     kRemoteTitleHeight);
+		painter.setPen(QPen(TileLabelBorder(program, preview, selected), 1.0));
+		painter.setBrush(TileLabelBackground(hasSource));
+		painter.drawRoundedRect(chipRect, kRemoteTitleRadius, kRemoteTitleRadius);
 
 		if (!hasSource) {
-			painter.setPen(QColor(QStringLiteral("#94a3b8")));
-			painter.drawText(tile.adjusted(18, 18, -18, -(kRemoteHeaderHeight + 24)), Qt::AlignCenter | Qt::TextWordWrap,
-					 QStringLiteral("Empty slot"));
+			painter.setPen(QColor(QStringLiteral("#8f96a3")));
+			painter.drawText(tile.adjusted(24, 24, -24, -24), Qt::AlignCenter | Qt::TextWordWrap,
+					 QStringLiteral("No scene assigned."));
 		}
 
 		painter.setPen(QColor(QStringLiteral("#f8fafc")));
-		painter.drawText(headerRect.adjusted(12, 0, -12, 0), Qt::AlignVCenter | Qt::TextSingleLine, slot.title);
-
-		QString badge;
-		if (program && preview)
-			badge = QStringLiteral("PROGRAM + PREVIEW");
-		else if (program)
-			badge = previewProgramMode ? QStringLiteral("PROGRAM") : QStringLiteral("LIVE");
-		else if (preview)
-			badge = QStringLiteral("PREVIEW");
-		else if (selected)
-			badge = QStringLiteral("SELECTED");
-
-		if (!badge.isEmpty()) {
-			QFont badgeFont = titleFont;
-			badgeFont.setPointSize(9);
-			badgeFont.setBold(true);
-			painter.setFont(badgeFont);
-			QRect badgeRect = headerRect.adjusted(12, 6, -12, -6);
-			painter.drawText(badgeRect, Qt::AlignRight | Qt::AlignVCenter | Qt::TextSingleLine, badge);
-			painter.setFont(titleFont);
-		}
+		painter.drawText(chipRect.adjusted(kRemoteTitlePadding, 0, -kRemoteTitlePadding, 0),
+				 Qt::AlignVCenter | Qt::TextSingleLine,
+				 painter.fontMetrics().elidedText(title, Qt::ElideRight, chipRect.width() - (kRemoteTitlePadding * 2)));
 	}
 
 	painter.end();

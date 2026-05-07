@@ -43,7 +43,6 @@ protected:
 
 			switch (surfaceEvent->surfaceEventType()) {
 			case QPlatformSurfaceEvent::SurfaceCreated:
-				display->MarkSurfaceCreated();
 				if (display->windowHandle()->isExposed())
 					createOBSDisplay();
 				else
@@ -195,9 +194,6 @@ bool QTToGSWindow(QWindow *window, gs_window &gswindow)
 void OBSQTDisplay::CreateDisplay(bool force)
 {
 	if (display)
-		return;
-
-	if (destroying)
 		return;
 
 	if (!windowHandle()->isExposed() && !force)
