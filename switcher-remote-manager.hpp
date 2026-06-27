@@ -120,6 +120,7 @@ private:
 	int targetFps = 10;
 	int httpPort = 8899;
 	int selectedSlotIndex = -1;
+	bool frontendShuttingDown = false;
 	bool frameBackpressureActive = false;
 	Status status = Status::Disabled;
 	QString statusDetail;

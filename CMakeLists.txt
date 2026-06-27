@@ -7,6 +7,7 @@ project(${_name} VERSION ${_version})
 include(compilerconfig)
 include(defaults)
 include(helpers)
+include(CTest)
 
 add_library(${CMAKE_PROJECT_NAME} MODULE)
 
@@ -15,10 +16,28 @@ find_package(obs-frontend-api REQUIRED)
 find_package(SIMDe REQUIRED)
 find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network)
 
+# Fetch ONNX Runtime dynamically for macOS
+include(FetchContent)
+if(OS_MACOS)
+  FetchContent_Declare(
+    onnxruntime
+    URL https://github.com/microsoft/onnxruntime/releases/download/v1.17.1/onnxruntime-osx-universal2-1.17.1.tgz
+  )
+  FetchContent_MakeAvailable(onnxruntime)
+endif()
+
 target_link_libraries(
   ${CMAKE_PROJECT_NAME}
   PRIVATE OBS::libobs OBS::obs-frontend-api SIMDe::SIMDe Qt6::Core Qt6::Widgets Qt6::Network
 )
+
+if(OS_MACOS)
+  target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${onnxruntime_SOURCE_DIR}/include)
+  target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE ${onnxruntime_SOURCE_DIR}/lib/libonnxruntime.dylib "-framework Metal" "-framework CoreVideo" "-framework CoreML")
+  target_link_options(${CMAKE_PROJECT_NAME} PRIVATE "-Wl,-rpath,@loader_path/../Frameworks")
+  set_property(TARGET ${CMAKE_PROJECT_NAME} APPEND PROPERTY BUILD_RPATH "@loader_path/../Frameworks")
+  set_property(TARGET ${CMAKE_PROJECT_NAME} APPEND PROPERTY INSTALL_RPATH "@loader_path/../Frameworks")
+endif()
 
 if(OS_LINUX OR OS_FREEBSD OR OS_OPENBSD)
   find_package(Qt6 REQUIRED COMPONENTS Gui)
@@ -49,8 +68,14 @@ target_sources(
   ${CMAKE_PROJECT_NAME}
   PRIVATE switcher-dock.cpp
           switcher-workspace.cpp
-          switcher-settings.cpp
+          switcher-ui.cpp
+          switch-automation-model.cpp
+          switch-osc.cpp
+          switch-canvas-manager.cpp
+          switch-automation-engine.cpp
+          switch-motion-manager.cpp
           switcher-remote-manager.cpp
+          switch-ai-tracker.mm
           switcher-remote-renderer.cpp
           qt-display.cpp
           media-control.cpp
@@ -59,8 +84,14 @@ target_sources(
           slider-absoluteset-style.cpp
           switcher-dock.hpp
           switcher-workspace.hpp
-          switcher-settings.hpp
+          switcher-ui.hpp
+          switch-automation-model.hpp
+          switch-osc.hpp
+          switch-canvas-manager.hpp
+          switch-automation-engine.hpp
+          switch-motion-manager.hpp
           switcher-remote-manager.hpp
+          switch-ai-tracker.hpp
           switcher-remote-renderer.hpp
           obs-websocket-api.h
           qt-display.hpp
@@ -77,6 +108,22 @@ if(OS_WINDOWS)
   set(SWITCHER_REMOTE_HELPER_FILENAME "switch-remote-helper.exe")
 else()
   set(SWITCHER_REMOTE_HELPER_FILENAME "switch-remote-helper")
+endif()
+
+if(OS_MACOS)
+  add_custom_command(
+    TARGET ${CMAKE_PROJECT_NAME}
+    POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_BUNDLE_DIR:${CMAKE_PROJECT_NAME}>/Contents/Frameworks"
+    COMMAND
+      "${CMAKE_COMMAND}" -E copy_if_different "${onnxruntime_SOURCE_DIR}/lib/libonnxruntime.1.17.1.dylib"
+      "$<TARGET_BUNDLE_DIR:${CMAKE_PROJECT_NAME}>/Contents/Frameworks/libonnxruntime.1.17.1.dylib"
+    COMMAND
+      "/usr/bin/codesign" "--force" "--sign" "-" "--timestamp" "-o" "runtime"
+      "$<TARGET_BUNDLE_DIR:${CMAKE_PROJECT_NAME}>/Contents/Frameworks/libonnxruntime.1.17.1.dylib"
+    COMMENT "Copy ONNX Runtime into plugin bundle"
+    VERBATIM
+  )
 endif()
 
 set(SWITCHER_REMOTE_HELPER_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/remote/${SWITCHER_REMOTE_HELPER_FILENAME}")
@@ -124,3 +171,7 @@ elseif(OS_WINDOWS)
 endif()
 
 set_target_properties_plugin(${CMAKE_PROJECT_NAME} PROPERTIES OUTPUT_NAME ${_name})
+
+if(BUILD_TESTING)
+  add_subdirectory(tests)
+endif()

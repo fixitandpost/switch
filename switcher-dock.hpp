@@ -93,6 +93,7 @@ struct SwitcherDockRegistrationOptions {
 	bool applyPlacement = false;
 	Qt::DockWidgetArea dockArea = Qt::LeftDockWidgetArea;
 	bool floating = false;
+	QSize floatingSize;
 };
 
 class SwitcherDock : public QSplitter {

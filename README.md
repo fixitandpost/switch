@@ -1,40 +1,106 @@
 # Switch
 
-Switch is an OBS Studio plugin from Fix It & Post that combines a
-multiview-style scene switcher with detachable source control docks.
+Switch is an OBS Studio plugin from Fix It & Post. It is built as one native OBS
+tool with four top-level modes:
 
-## What It Does
+- **Workspace**: a multiview-style scene switcher with detachable source/view
+  surfaces and quick projector/output controls.
+- **Vertical**: a vertical-canvas workflow with linked scenes, projectors,
+  windows, compact/dedicated OBS docks, and persisted vertical output settings.
+- **Motion**: a native source-filter auto-framing engine with person detection,
+  stable tracking IDs, subject lock/cycle controls, and smooth virtual PTZ
+  pan/tilt/zoom.
+- **Automation**: a macro system with triggers, actions, variables, queues,
+  reusable connections, event log, import/export, and obs-websocket vendor APIs.
 
-- Opens a Switch workspace from the OBS `Tools` menu
-- Shows 4, 9, 16, or 25 scene views in a multiview-style layout
-- Lets you switch scenes directly from the grid
-- Supports detached docks for per-source preview, media controls, audio
-  controls, filters, properties, and scene item actions
+The plugin does not have a runtime dependency on external example repos.
+
+## Product Surface
+
+- `Tools -> Switch` opens the main Switch window.
+- The main window uses a `Workspace / Vertical / Motion / Automation` shell.
+- OBS docks expose focused Vertical surfaces:
+  - `Switch Vertical`
+  - `Switch Vertical Scenes`
+  - `Switch Vertical Sources`
+  - `Switch Vertical Transitions`
+  - `Switch Vertical Settings`
+- OBS Controls can expose quick Switch projector buttons for Multiview and
+  Program outputs.
+- Motion is applied through the `Switch Motion` OBS source filter, but normal
+  configuration lives in the Motion tab.
+- Vendor requests expose Workspace, Canvas, Output, Motion, and Automation
+  control surfaces for obs-websocket/local remote workflows.
+- `Switch.GetCapabilities` reports supported modes, namespaces, Motion backend
+  options, and the current Vertical output-control scope.
+
+## Current Production Notes
+
+- Motion keeps its historical OBS filter id for compatibility with existing
+  scenes, even though the user-facing name is `Switch Motion`.
+- macOS Motion `Auto` selects the CoreML execution provider first. Apple decides
+  the final CPU/GPU/ANE placement for CoreML execution; Switch does not promise
+  ANE-only or zero-CPU inference.
+- `SWITCH_MOTION_COREML_CPU_ONLY=1` forces CoreML CPU diagnostics mode.
+- Vertical output settings are persisted by Switch. Some output buttons still
+  call OBS global frontend output APIs until a fully isolated vertical output
+  backend is enabled.
+- Motion model binaries are installer-managed. The repository keeps
+  `data/models/manifest.json` for filename, parser, install location, and
+  checksum metadata, but does not commit `.onnx`, `.pt`, `.mlmodel`, or
+  `.mlpackage` artifacts.
+- Installers can call `script/download_motion_model.sh` with
+  `SWITCH_MOTION_MODEL_URL` to download and checksum the Motion model into the
+  installed plugin data directory.
 
 ## Local Build
 
 This repository follows the standalone OBS plugin workflow recommended by the
 OBS Project, so it does not need to live inside the OBS Studio source tree.
 
-1. Configure the macOS build:
+For everyday macOS development, use the repo-local run loop:
 
-   `cmake --preset macos`
+```sh
+./script/build_and_run.sh
+```
 
-2. Build the plugin:
+That script will:
 
-   `cmake --build build_macos --config RelWithDebInfo --parallel`
+- gracefully stop OBS Studio if it is running
+- recreate `build_macos` if the checkout path changed
+- configure and build the `macos` preset
+- copy the finished `switch.plugin` bundle into your local OBS plugin folder
+- relaunch OBS Studio
 
-3. Install it into the default OBS plugin directory:
+Additional modes:
 
-   `cmake --install build_macos --config RelWithDebInfo`
+```sh
+./script/build_and_run.sh --verify
+./script/build_and_run.sh --logs
+./script/build_and_run.sh --telemetry
+./script/build_and_run.sh --debug
+```
 
-By default, the macOS install location is:
+Raw configure and build steps:
 
-`~/Library/Application Support/obs-studio/plugins`
+```sh
+cmake --preset macos
+cmake --build --preset macos --parallel
+ctest --test-dir build_macos --output-on-failure -C RelWithDebInfo
+```
 
-To stage an install somewhere else for inspection, override the prefix:
+The built plugin bundle is available at:
 
-`cmake --install build_macos --config RelWithDebInfo --prefix "$PWD/release/RelWithDebInfo"`
+```text
+build_macos/RelWithDebInfo/switch.plugin
+```
+
+For release staging and packaging, install into a separate prefix instead of
+your live OBS plugin directory:
+
+```sh
+cmake --install build_macos --config RelWithDebInfo --prefix "$PWD/release/RelWithDebInfo"
+```
 
 ## Compatibility
 
@@ -47,12 +113,11 @@ To stage an install somewhere else for inspection, override the prefix:
 Switch is built for the OBS `32.x` UI and runtime model. OBS versions older
 than `32.1.2` are unsupported.
 
-## Notes
+## Architecture Notes
 
-- Local builds use the official OBS Studio `32.1.2` development headers and the
-  matching dependency versions defined in `buildspec.json`.
-- If you want to use a non-default plugin location while testing, OBS also
-  supports `OBS_PLUGINS_PATH` and `OBS_PLUGINS_DATA_PATH`.
+- [docs/example-integration-plan.md](/Users/nitchevcasseus/Documents/GitHub/switch/docs/example-integration-plan.md)
+  records the reference-plugin research and the current guardrails for
+  Advanced Scene Switcher/Aitum-inspired features.
 
 ## Maintained By
 
@@ -63,5 +128,6 @@ Repository: [github.com/fixitandpost/switch](https://github.com/fixitandpost/swi
 ## References
 
 - [OBS plugin docs](https://docs.obsproject.com/plugins)
+- [OBS source API](https://docs.obsproject.com/reference-sources)
 - [OBS frontend API](https://docs.obsproject.com/reference-frontend-api)
 - [OBS plugin template](https://github.com/obsproject/obs-plugintemplate)

@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "models": [
+    {
+      "id": "switch-motion-yolo26-nano",
+      "file": "yolo26-nano.onnx",
+      "format": "onnx",
+      "task": "person-detection",
+      "inputShape": [1, 3, 640, 640],
+      "outputParser": "yolo26-end-to-end-nx6",
+      "distribution": "installer-download",
+      "installSubdir": "models",
+      "downloadUrlEnv": "SWITCH_MOTION_MODEL_URL",
+      "sha256": "6a20ea5d81085f5e084dbe2b3e4ca013bea8c3a8dc1b99aa42a1f80488bf4d3f",
+      "notes": "The installer downloads this model into the plugin data path. The repository keeps only this manifest and checksum; do not commit model binaries."
+    }
+  ]
+}

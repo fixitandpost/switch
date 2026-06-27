@@ -5,6 +5,16 @@
 /release/
 /installer/Output/
 /.deps/
+/.codex/
+
+# Local model export/runtime artifacts. Switch Motion installers download
+# runtime models; the repo keeps only data/models/manifest.json.
+*.pt
+*.pth
+*.onnx
+*.mlmodel
+*.mlpackage/
+!data/models/manifest.json
 
 .vscode
 .idea

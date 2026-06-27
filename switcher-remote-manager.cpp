@@ -146,6 +146,12 @@ void SwitcherRemoteManager::LoadState(obs_data_t *data)
 void SwitcherRemoteManager::HandleFrontendEvent(enum obs_frontend_event event)
 {
 	switch (event) {
+	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED:
+		frontendShuttingDown = false;
+		SyncSelectedSlotFromObs();
+		SendStateSnapshot("PreviewProgramChanged");
+		break;
 	case OBS_FRONTEND_EVENT_SCENE_CHANGED:
 	case OBS_FRONTEND_EVENT_PREVIEW_SCENE_CHANGED:
 	case OBS_FRONTEND_EVENT_STUDIO_MODE_DISABLED:
@@ -153,21 +159,29 @@ void SwitcherRemoteManager::HandleFrontendEvent(enum obs_frontend_event event)
 	case OBS_FRONTEND_EVENT_STREAMING_STARTING:
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
 	case OBS_FRONTEND_EVENT_STREAMING_STOPPING:
-	case OBS_FRONTEND_EVENT_STREAMING_STOPPED:
-	case OBS_FRONTEND_EVENT_RECORDING_STARTING:
-	case OBS_FRONTEND_EVENT_RECORDING_STARTED:
-	case OBS_FRONTEND_EVENT_RECORDING_STOPPING:
-	case OBS_FRONTEND_EVENT_RECORDING_STOPPED:
+		case OBS_FRONTEND_EVENT_STREAMING_STOPPED:
+		case OBS_FRONTEND_EVENT_RECORDING_STARTING:
+		case OBS_FRONTEND_EVENT_RECORDING_STARTED:
+		case OBS_FRONTEND_EVENT_RECORDING_STOPPING:
+		case OBS_FRONTEND_EVENT_RECORDING_STOPPED:
 	case OBS_FRONTEND_EVENT_RECORDING_PAUSED:
 	case OBS_FRONTEND_EVENT_RECORDING_UNPAUSED:
-		SyncSelectedSlotFromObs();
-		SendStateSnapshot("PreviewProgramChanged");
-		break;
-	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP:
-		selectedSlotIndex = -1;
-		SendStateSnapshot("SlotsChanged");
-		break;
+		if (frontendShuttingDown)
+			break;
+			SyncSelectedSlotFromObs();
+			SendStateSnapshot("PreviewProgramChanged");
+			break;
+		case OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN:
+			frontendShuttingDown = true;
+			selectedSlotIndex = -1;
+			Shutdown();
+			break;
+		case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CLEANUP:
+			frontendShuttingDown = true;
+			selectedSlotIndex = -1;
+			break;
 	case OBS_FRONTEND_EVENT_EXIT:
+		frontendShuttingDown = true;
 		Shutdown();
 		break;
 	default:
@@ -792,6 +806,7 @@ QString SwitcherRemoteManager::HelperPath() const
 
 QJsonObject SwitcherRemoteManager::BuildStateJson() const
 {
+	const bool frontendReady = !frontendShuttingDown;
 	QJsonObject root{
 		{"enabled", enabled},
 		{"autoStart", autoStart},
@@ -804,8 +819,8 @@ QJsonObject SwitcherRemoteManager::BuildStateJson() const
 		{"httpPort", httpPort},
 		{"token", token},
 		{"selectedSlotIndex", selectedSlotIndex},
-		{"previewProgramMode", obs_frontend_preview_program_mode_active()},
-		{"transitionDurationMs", obs_frontend_get_transition_duration()},
+		{"previewProgramMode", frontendReady ? obs_frontend_preview_program_mode_active() : false},
+		{"transitionDurationMs", frontendReady ? obs_frontend_get_transition_duration() : 0},
 		{"targetFps", targetFps},
 		{"renderWidth", renderSize.width()},
 		{"renderHeight", renderSize.height()},
@@ -817,24 +832,25 @@ QJsonObject SwitcherRemoteManager::BuildStateJson() const
 
 	const int visibleSlots = workspace->VisibleSlotCount();
 	root.insert(QStringLiteral("visibleSlots"), visibleSlots);
-	root.insert(QStringLiteral("programSlotIndex"), ResolveProgramSlotIndex());
-	root.insert(QStringLiteral("previewSlotIndex"), ResolvePreviewSlotIndex());
+	root.insert(QStringLiteral("programSlotIndex"), frontendReady ? ResolveProgramSlotIndex() : -1);
+	root.insert(QStringLiteral("previewSlotIndex"), frontendReady ? ResolvePreviewSlotIndex() : -1);
 
 	const auto layout = BuildSwitcherRemoteTileLayout(visibleSlots, renderSize);
 	QJsonArray slotEntries;
 
 	obs_source_t *previewSource = nullptr;
-	if (obs_frontend_preview_program_mode_active())
+	if (frontendReady && obs_frontend_preview_program_mode_active())
 		previewSource = obs_frontend_get_current_preview_scene();
-	obs_source_t *programSource = obs_frontend_get_current_scene();
+	obs_source_t *programSource = frontendReady ? obs_frontend_get_current_scene() : nullptr;
 
 	for (int index = 0; index < visibleSlots; index++) {
 		const OBSSource source = workspace->SlotSource(index);
 		const bool hasSource = source != nullptr;
-		const bool preview = hasSource &&
-				     ((obs_frontend_preview_program_mode_active() && SourceInTree(previewSource, source)) ||
-				      (!obs_frontend_preview_program_mode_active() && index == selectedSlotIndex));
-		const bool program = hasSource && SourceInTree(programSource, source);
+		const bool preview =
+			frontendReady && hasSource &&
+			((obs_frontend_preview_program_mode_active() && SourceInTree(previewSource, source)) ||
+			 (!obs_frontend_preview_program_mode_active() && index == selectedSlotIndex));
+		const bool program = frontendReady && hasSource && SourceInTree(programSource, source);
 
 		QJsonObject slot{
 			{"index", index},
