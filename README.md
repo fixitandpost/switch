@@ -42,6 +42,8 @@ The plugin does not have a runtime dependency on external example repos.
   the final CPU/GPU/ANE placement for CoreML execution; Switch does not promise
   ANE-only or zero-CPU inference.
 - `SWITCH_MOTION_COREML_CPU_ONLY=1` forces CoreML CPU diagnostics mode.
+- Windows Motion `Auto` selects the ONNX Runtime DirectML execution provider
+  first, which targets the Windows GPU device through DirectML.
 - Vertical output settings are persisted by Switch. Some output buttons still
   call OBS global frontend output APIs until a fully isolated vertical output
   backend is enabled.
@@ -49,9 +51,12 @@ The plugin does not have a runtime dependency on external example repos.
   `data/models/manifest.json` for filename, parser, install location, and
   checksum metadata, but does not commit `.onnx`, `.pt`, `.mlmodel`, or
   `.mlpackage` artifacts.
-- Installers can call `script/download_motion_model.sh` with
-  `SWITCH_MOTION_MODEL_URL` to download and checksum the Motion model into the
-  installed plugin data directory.
+- Installers can call the packaged
+  `data/scripts/download-motion-model.ps1` on Windows or
+  `script/download_motion_model.sh` on Unix-like systems to download and
+  checksum the Motion model into the installed plugin data directory. The
+  manifest carries the default pinned URL; `SWITCH_MOTION_MODEL_URL` can
+  override it for signed private releases.
 
 ## Local Build
 
@@ -115,9 +120,14 @@ than `32.1.2` are unsupported.
 
 ## Architecture Notes
 
-- [docs/example-integration-plan.md](/Users/nitchevcasseus/Documents/GitHub/switch/docs/example-integration-plan.md)
+- [docs/example-integration-plan.md](docs/example-integration-plan.md)
   records the reference-plugin research and the current guardrails for
   Advanced Scene Switcher/Aitum-inspired features.
+- [docs/vendor-api.md](docs/vendor-api.md) documents the obs-websocket vendor
+  API contract, namespaced requests, and deprecated compatibility aliases.
+- [docs/release-checklist.md](docs/release-checklist.md) records the packaged
+  release verification path. Release acceptance must use an installed package,
+  not only a development rundir.
 
 ## Maintained By
 

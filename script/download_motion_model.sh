@@ -2,16 +2,11 @@
 set -euo pipefail
 
 usage() {
-  printf 'Usage: SWITCH_MOTION_MODEL_URL=<url> %s <plugin-data-dir> [manifest]\n' "$0" >&2
+  printf 'Usage: [SWITCH_MOTION_MODEL_URL=<url>] %s <plugin-data-dir> [manifest]\n' "$0" >&2
 }
 
 if [[ $# -lt 1 || $# -gt 2 ]]; then
   usage
-  exit 2
-fi
-
-if [[ -z "${SWITCH_MOTION_MODEL_URL:-}" ]]; then
-  printf 'SWITCH_MOTION_MODEL_URL is required.\n' >&2
   exit 2
 fi
 
@@ -38,9 +33,16 @@ read_manifest_value() {
 
 model_file=$(read_manifest_value file)
 expected_sha=$(read_manifest_value sha256)
+default_url=$(read_manifest_value downloadUrl)
 
 if [[ -z "${model_file}" || "${model_file}" == "null" || -z "${expected_sha}" || "${expected_sha}" == "null" ]]; then
   printf 'Motion model manifest is missing file or sha256.\n' >&2
+  exit 2
+fi
+
+download_url=${SWITCH_MOTION_MODEL_URL:-${default_url}}
+if [[ -z "${download_url}" || "${download_url}" == "null" ]]; then
+  printf 'Motion model download URL is required. Set SWITCH_MOTION_MODEL_URL or provide downloadUrl in the manifest.\n' >&2
   exit 2
 fi
 
@@ -49,7 +51,7 @@ destination="${model_dir}/${model_file}"
 temporary="${destination}.download"
 
 mkdir -p "${model_dir}"
-curl --fail --location --show-error --output "${temporary}" "${SWITCH_MOTION_MODEL_URL}"
+curl --fail --location --show-error --output "${temporary}" "${download_url}"
 
 actual_sha=$(shasum -a 256 "${temporary}" | awk '{print $1}')
 if [[ "${actual_sha}" != "${expected_sha}" ]]; then

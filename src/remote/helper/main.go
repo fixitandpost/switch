@@ -14,10 +14,19 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
 )
+
+type RemoteBridge interface {
+	LastState() []byte
+	WaitForFrame(ctx context.Context, lastSeq uint64) ([]byte, uint64, error)
+	RegisterListener() chan []byte
+	UnregisterListener(ch chan []byte)
+	SendCommand(command map[string]any) error
+}
 
 type Bridge struct {
 	conn        net.Conn
@@ -131,8 +140,9 @@ func (b *Bridge) SendCommand(command map[string]any) error {
 }
 
 type Server struct {
-	token  string
-	bridge *Bridge
+	token   string
+	bridge  RemoteBridge
+	webRoot string
 }
 
 func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) bool {
@@ -148,8 +158,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_, _ = io.WriteString(w, indexHTML)
+	http.ServeFile(w, r, filepath.Join(s.webRoot, "index.html"))
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -314,10 +323,16 @@ func main() {
 	controlPort := flag.Int("control-port", 0, "local control port")
 	httpPort := flag.Int("http-port", 8899, "HTTP port")
 	token := flag.String("token", "", "access token")
+	webRoot := flag.String("web-root", "", "path to Switch Remote web assets")
 	flag.Parse()
 
 	if *controlPort == 0 || *token == "" {
 		log.Fatal("missing required flags")
+	}
+
+	resolvedWebRoot, err := resolveWebRoot(*webRoot)
+	if err != nil {
+		log.Fatalf("remote web assets unavailable: %v", err)
 	}
 
 	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", *controlPort))
@@ -328,8 +343,9 @@ func main() {
 
 	bridge := NewBridge(conn)
 	server := &Server{
-		token:  *token,
-		bridge: bridge,
+		token:   *token,
+		bridge:  bridge,
+		webRoot: resolvedWebRoot,
 	}
 
 	go func() {
@@ -353,7 +369,7 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("listening on http://0.0.0.0:%d", *httpPort)
+		log.Printf("listening on 0.0.0.0:%d", *httpPort)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Printf("http server failed: %v", err)
 			_ = conn.Close()
@@ -370,173 +386,23 @@ func main() {
 	_ = httpServer.Shutdown(ctx)
 }
 
-const indexHTML = `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Switch Remote</title>
-  <style>
-    :root {
-      color-scheme: dark;
-      --bg: #1f2129;
-      --press: rgba(248, 250, 252, 0.05);
-    }
-    * { box-sizing: border-box; }
-    html, body {
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-    }
-    body {
-      margin: 0;
-      min-height: 100dvh;
-      background: var(--bg);
-      display: grid;
-      place-items: center;
-      font: 500 15px/1.4 "SF Pro Display", "Segoe UI", sans-serif;
-      touch-action: manipulation;
-      -webkit-tap-highlight-color: transparent;
-      user-select: none;
-    }
-    .viewport {
-      width: 100vw;
-      height: 100dvh;
-      display: grid;
-      place-items: center;
-      overflow: hidden;
-      background: var(--bg);
-    }
-    .stage {
-      position: relative;
-      width: min(100vw, calc(100dvh * 16 / 9));
-      height: min(100dvh, calc(100vw * 9 / 16));
-      background: var(--bg);
-    }
-    .stage img {
-      display: block;
-      width: 100%;
-      height: 100%;
-      object-fit: fill;
-      background: var(--bg);
-    }
-    .overlay {
-      position: absolute;
-      inset: 0;
-      pointer-events: auto;
-    }
-    .tile-hitbox {
-      position: absolute;
-      margin: 0;
-      padding: 0;
-      background: transparent;
-      border: 0;
-      border-radius: 0;
-      cursor: pointer;
-      appearance: none;
-      touch-action: manipulation;
-    }
-    .tile-hitbox:disabled {
-      cursor: default;
-    }
-    .tile-hitbox:active:not(:disabled) {
-      background: var(--press);
-    }
-  </style>
-</head>
-<body>
-  <div class="viewport">
-    <div class="stage">
-      <img id="feed" alt="Switch remote feed">
-      <div id="overlay" class="overlay"></div>
-    </div>
-  </div>
-  <script>
-    const params = new URLSearchParams(window.location.search);
-    const token = params.get('token') || '';
-    const feed = document.getElementById('feed');
-    const overlay = document.getElementById('overlay');
+func resolveWebRoot(configured string) (string, error) {
+	root := configured
+	if root == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			return "", err
+		}
+		root = filepath.Join(filepath.Dir(exe), "web")
+	}
 
-    let currentState = null;
-    let eventSource = null;
-    let reconnectTimer = null;
-
-    function command(command, extra = {}) {
-      return fetch('/api/command?token=' + encodeURIComponent(token), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ command, ...extra }),
-      });
-    }
-
-    function refreshFeed(cacheBust = false) {
-      const suffix = cacheBust ? ('&t=' + Date.now()) : '';
-      feed.src = '/feed.mjpg?token=' + encodeURIComponent(token) + suffix;
-    }
-
-    function scheduleReconnect() {
-      if (reconnectTimer) return;
-      reconnectTimer = window.setTimeout(() => {
-        reconnectTimer = null;
-        restartStreams(true);
-      }, 1500);
-    }
-
-    function activateSlot(slot) {
-      if (!currentState || !currentState.enabled || !slot || !slot.hasSource) return;
-
-      if (currentState.selectedSlotIndex === slot.index) {
-        command('cut');
-        return;
-      }
-
-      command('select_preview_slot', { slotIndex: slot.index });
-    }
-
-    function renderState(state) {
-      currentState = state;
-      overlay.replaceChildren();
-
-      for (const slot of state.slots || []) {
-        const rect = slot.rect;
-        if (!rect) continue;
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'tile-hitbox';
-        button.style.left = (rect.x * 100) + '%';
-        button.style.top = (rect.y * 100) + '%';
-        button.style.width = (rect.width * 100) + '%';
-        button.style.height = (rect.height * 100) + '%';
-        button.title = slot.title || ('Slot ' + (slot.index + 1));
-        button.ariaLabel = slot.title || ('Slot ' + (slot.index + 1));
-        button.disabled = !state.enabled || !slot.hasSource;
-        button.addEventListener('click', () => activateSlot(slot));
-        overlay.appendChild(button);
-      }
-    }
-
-    function connectEvents() {
-      if (eventSource) eventSource.close();
-      eventSource = new EventSource('/events?token=' + encodeURIComponent(token));
-      eventSource.addEventListener('state', (event) => {
-        renderState(JSON.parse(event.data));
-      });
-      eventSource.onerror = () => {
-        scheduleReconnect();
-      };
-    }
-
-    function restartStreams(cacheBust = false) {
-      connectEvents();
-      refreshFeed(cacheBust);
-    }
-
-    feed.addEventListener('error', () => scheduleReconnect());
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) restartStreams(true);
-    });
-
-    restartStreams(false);
-  </script>
-</body>
-</html>`
+	indexPath := filepath.Join(root, "index.html")
+	info, err := os.Stat(indexPath)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("%s is a directory", indexPath)
+	}
+	return root, nil
+}

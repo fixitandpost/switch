@@ -13,17 +13,28 @@ if ( $DebugPreference -eq 'Continue' ) {
     $InformationPreference = 'Continue'
 }
 
-if ( $env:CI -eq $null ) {
-    throw "Build-Windows.ps1 requires CI environment"
-}
-
 if ( ! ( [System.Environment]::Is64BitOperatingSystem ) ) {
     throw "A 64-bit system is required to build the project."
 }
 
-if ( $PSVersionTable.PSVersion -lt '7.2.0' ) {
-    Write-Warning 'The obs-studio PowerShell build script requires PowerShell Core 7. Install or upgrade your PowerShell version: https://aka.ms/pscore6'
+if ( $PSVersionTable.PSVersion -lt '5.1.0' ) {
+    Write-Warning 'The Switch Windows build script requires PowerShell 5.1 or newer.'
     exit 2
+}
+
+function Add-KnownToolPath([string] $Path) {
+    if ( ( Test-Path -LiteralPath $Path ) -and
+         ( $env:Path -split ';' | Where-Object { $_ -ieq $Path } ).Count -eq 0 ) {
+        $env:Path = "${Path};${env:Path}"
+    }
+}
+
+Add-KnownToolPath 'C:\Program Files\CMake\bin'
+Add-KnownToolPath 'C:\Program Files\Go\bin'
+
+$CmakeCommand = Get-Command cmake -ErrorAction SilentlyContinue
+if ( ! $CmakeCommand ) {
+    throw 'CMake was not found. Install CMake before building Switch.'
 }
 
 function Build {
@@ -46,6 +57,9 @@ function Build {
 
     Push-Location -Stack BuildTemp
     Ensure-Location $ProjectRoot
+
+    $BuildSpec = Get-Content -Path "${ProjectRoot}/buildspec.json" -Raw | ConvertFrom-Json
+    $ProductName = $BuildSpec.name
 
     $CmakeArgs = @('--preset', "windows-ci-${Target}")
     $CmakeBuildArgs = @('--build')
@@ -71,13 +85,13 @@ function Build {
     )
 
     Log-Group "Configuring ${ProductName}..."
-    Invoke-External cmake @CmakeArgs
+    Invoke-External $CmakeCommand.Source @CmakeArgs
 
     Log-Group "Building ${ProductName}..."
-    Invoke-External cmake @CmakeBuildArgs
+    Invoke-External $CmakeCommand.Source @CmakeBuildArgs
 
     Log-Group "Installing ${ProductName}..."
-    Invoke-External cmake @CmakeInstallArgs
+    Invoke-External $CmakeCommand.Source @CmakeInstallArgs
 
     Pop-Location -Stack BuildTemp
     Log-Group

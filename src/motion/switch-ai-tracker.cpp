@@ -1,9 +1,14 @@
 #include "switch-ai-tracker.hpp"
 
-#include <coreml_provider_factory.h>
 #include <onnxruntime_cxx_api.h>
 #include <obs-properties.h>
 #include <util/platform.h>
+
+#if defined(__APPLE__)
+#include <coreml_provider_factory.h>
+#elif defined(_WIN32)
+#include <dml_provider_factory.h>
+#endif
 
 #include <QFileInfo>
 
@@ -378,9 +383,27 @@ public:
 					return false;
 				}
 			}
+#elif defined(_WIN32)
+			if (selectedBackend == QStringLiteral("directml")) {
+				options.SetExecutionMode(ExecutionMode::ORT_SEQUENTIAL);
+				if (OrtStatus *status = OrtSessionOptionsAppendExecutionProvider_DML(options, 0)) {
+					const OrtApi &api = Ort::GetApi();
+					if (message) {
+						*message = QStringLiteral("DirectML provider unavailable: %1")
+								   .arg(QString::fromUtf8(api.GetErrorMessage(status)));
+					}
+					api.ReleaseStatus(status);
+					return false;
+				}
+			}
 #endif
 
+#if defined(_WIN32)
+			const std::wstring nativeModelPath = modelPath.toStdWString();
+			session = std::make_unique<Ort::Session>(OrtEnv(), nativeModelPath.c_str(), options);
+#else
 			session = std::make_unique<Ort::Session>(OrtEnv(), modelPath.toUtf8().constData(), options);
+#endif
 
 			Ort::AllocatorWithDefaultOptions allocator;
 			auto inputNameAllocated = session->GetInputNameAllocated(0, allocator);
@@ -409,7 +432,7 @@ public:
 				       : QStringLiteral("CoreML EP static-shape provider; Apple chooses CPU/GPU/ANE placement");
 		}
 		if (backend == QStringLiteral("directml"))
-			return QStringLiteral("DirectML EP requested; sequential execution required on Windows");
+			return QStringLiteral("DirectML EP active on Windows GPU device 0");
 		if (backend == QStringLiteral("cpu"))
 			return QStringLiteral("CPU diagnostics provider");
 		return backend.isEmpty() ? QStringLiteral("unloaded") : backend;
@@ -1214,7 +1237,6 @@ void InferenceLoop(tracker_filter_data *filter)
 {
 	MotionInferenceRuntime runtime;
 	while (true) {
-		@autoreleasepool {
 		SwitchMotionFrameSample frame;
 		{
 			std::unique_lock<std::mutex> lock(filter->inferenceMutex);
@@ -1354,7 +1376,6 @@ void InferenceLoop(tracker_filter_data *filter)
 
 		PublishRuntimeState(filter, activeProfile, next, tracks, runtime, runtimeMessage, preprocessingMs,
 				    inferenceMs, trackingMs);
-		}
 	}
 }
 } // namespace

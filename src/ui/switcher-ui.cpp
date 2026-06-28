@@ -9,13 +9,6 @@
 #include <QPen>
 
 namespace {
-
-QColor UiWithAlpha(QColor color, int alpha)
-{
-	color.setAlpha(std::clamp(alpha, 0, 255));
-	return color;
-}
-
 void DrawSwitchModeGlyph(QPainter *painter, const QRect &rect, const QString &glyph, const QColor &color)
 {
 	if (!painter)
@@ -65,6 +58,31 @@ void DrawSwitchModeGlyph(QPainter *painter, const QRect &rect, const QString &gl
 
 } // namespace
 
+QColor SwitchUi::WithAlpha(QColor color, int alpha)
+{
+	color.setAlpha(std::clamp(alpha, 0, 255));
+	return color;
+}
+
+QColor SwitchUi::Blend(const QColor &first, const QColor &second, qreal ratio)
+{
+	ratio = std::clamp(ratio, 0.0, 1.0);
+	const auto inverse = 1.0 - ratio;
+	return QColor::fromRgbF(first.redF() * inverse + second.redF() * ratio,
+				 first.greenF() * inverse + second.greenF() * ratio,
+				 first.blueF() * inverse + second.blueF() * ratio,
+				 first.alphaF() * inverse + second.alphaF() * ratio);
+}
+
+QString SwitchUi::CssColor(const QColor &color)
+{
+	return QStringLiteral("rgba(%1, %2, %3, %4)")
+		.arg(color.red())
+		.arg(color.green())
+		.arg(color.blue())
+		.arg(color.alpha());
+}
+
 SwitchModeItemDelegate::SwitchModeItemDelegate(QObject *parent) : QStyledItemDelegate(parent) {}
 
 QSize SwitchModeItemDelegate::sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const
@@ -91,8 +109,8 @@ void SwitchModeItemDelegate::paint(QPainter *painter, const QStyleOptionViewItem
 	painter->save();
 	painter->setRenderHint(QPainter::Antialiasing, true);
 	if (selected || hovered) {
-		const QColor fill = selected ? highlight : UiWithAlpha(highlight, 34);
-		const QColor border = selected ? highlight : UiWithAlpha(highlight, 128);
+		const QColor fill = selected ? highlight : SwitchUi::WithAlpha(highlight, 34);
+		const QColor border = selected ? highlight : SwitchUi::WithAlpha(highlight, 128);
 		painter->setPen(QPen(border, 1.0));
 		painter->setBrush(fill);
 		painter->drawRoundedRect(rowRect.adjusted(0, 0, -1, -1), 4.0, 4.0);

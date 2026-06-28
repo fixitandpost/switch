@@ -50,40 +50,41 @@ Switch is now organized around four top-level modes:
 
 The current implementation spans these main files:
 
-- [`switcher-dock.cpp`](/Users/nitchevcasseus/Documents/GitHub/switch/switcher-dock.cpp):
+- [`src/module/switcher-dock.cpp`](../src/module/switcher-dock.cpp):
   OBS module entrypoint, Tools menu, dock registration, frontend lifecycle, and
   obs-websocket vendor requests.
-- [`switcher-workspace.cpp`](/Users/nitchevcasseus/Documents/GitHub/switch/switcher-workspace.cpp):
+- [`src/workspace/switcher-workspace.cpp`](../src/workspace/switcher-workspace.cpp):
   main Switch UI, workspace grid, vertical UI, Motion UI, automation UI, and
   dock widgets.
-- [`switch-canvas-manager.cpp`](/Users/nitchevcasseus/Documents/GitHub/switch/switch-canvas-manager.cpp):
+- [`src/vertical/switch-canvas-manager.cpp`](../src/vertical/switch-canvas-manager.cpp):
   vertical canvas state, scene linking, transition overrides, and output state
   persistence.
-- [`switch-motion-manager.cpp`](/Users/nitchevcasseus/Documents/GitHub/switch/switch-motion-manager.cpp):
+- [`src/motion/switch-motion-manager.cpp`](../src/motion/switch-motion-manager.cpp):
   Motion profiles, source/filter binding, track state, serialization, and
   runtime telemetry.
-- [`switch-ai-tracker.mm`](/Users/nitchevcasseus/Documents/GitHub/switch/switch-ai-tracker.mm):
+- [`src/motion/switch-ai-tracker.cpp`](../src/motion/switch-ai-tracker.cpp):
   compatibility-named native OBS filter for Switch Motion inference and
   non-blocking render transforms.
-- [`switch-automation-engine.cpp`](/Users/nitchevcasseus/Documents/GitHub/switch/switch-automation-engine.cpp):
+- [`src/automation/switch-automation-engine.cpp`](../src/automation/switch-automation-engine.cpp):
   macro runtime and frontend/OSC-backed trigger/action execution.
-- [`switch-automation-model.cpp`](/Users/nitchevcasseus/Documents/GitHub/switch/switch-automation-model.cpp):
+- [`src/automation/switch-automation-model.cpp`](../src/automation/switch-automation-model.cpp):
   automation document model and serialization.
-- [`switch-osc.cpp`](/Users/nitchevcasseus/Documents/GitHub/switch/switch-osc.cpp):
+- [`src/automation/switch-osc.cpp`](../src/automation/switch-osc.cpp):
   OSC transport and parsing.
 
 ## Known Production Gaps
 
-- `switcher-workspace.cpp` and `switcher-dock.cpp` are still large coordination
-  files. They should be split into domain widgets/controllers and per-domain
-  vendor API handlers after the current behavior is stable.
+- `src/workspace/switcher-workspace.cpp` and `src/module/switcher-dock.cpp` are
+  still large coordination files. They should continue to be split into domain
+  widgets/controllers and per-domain vendor API handlers after the current
+  behavior is stable.
 - The Motion filter keeps the historical `switch_ai_tracker` OBS id to preserve
   scene compatibility. A future migration can add a new id only if existing
   scenes are upgraded safely.
 - macOS Motion uses CoreML in Auto mode, but CoreML/ONNX Runtime provider flags
   do not guarantee ANE-only execution.
-- Windows DirectML packaging and provider wiring still need a dedicated platform
-  pass.
+- Windows Motion uses ONNX Runtime DirectML in Auto mode and packages the
+  runtime DLL beside the installed plugin binary.
 - Vertical output controls persist Switch settings, but some start/stop buttons
   still operate OBS global outputs until the isolated vertical backend is built.
 - Automation is usable but not full Advanced Scene Switcher parity. New
@@ -98,4 +99,5 @@ The current implementation spans these main files:
 3. Split large source files by ownership once the live workflows are stable.
 4. Keep model binaries installer-managed: source keeps only the manifest and
    checksum contract.
-5. Add Windows DirectML validation after macOS CoreML behavior is stable.
+5. Keep Windows DirectML validation in the packaged release script so GPU
+   runtime regressions are caught from the installed plugin.

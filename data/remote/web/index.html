@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Switch Remote</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #1f2129;
+      --press: rgba(248, 250, 252, 0.05);
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+    }
+    body {
+      margin: 0;
+      min-height: 100dvh;
+      background: var(--bg);
+      display: grid;
+      place-items: center;
+      font: 500 15px/1.4 "SF Pro Display", "Segoe UI", sans-serif;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+    .viewport {
+      width: 100vw;
+      height: 100dvh;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      background: var(--bg);
+    }
+    .stage {
+      position: relative;
+      width: min(100vw, calc(100dvh * 16 / 9));
+      height: min(100dvh, calc(100vw * 9 / 16));
+      background: var(--bg);
+    }
+    .stage img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: fill;
+      background: var(--bg);
+    }
+    .overlay {
+      position: absolute;
+      inset: 0;
+      pointer-events: auto;
+    }
+    .tile-hitbox {
+      position: absolute;
+      margin: 0;
+      padding: 0;
+      background: transparent;
+      border: 0;
+      border-radius: 0;
+      cursor: pointer;
+      appearance: none;
+      touch-action: manipulation;
+    }
+    .tile-hitbox:disabled {
+      cursor: default;
+    }
+    .tile-hitbox:active:not(:disabled) {
+      background: var(--press);
+    }
+  </style>
+</head>
+<body>
+  <div class="viewport">
+    <div class="stage">
+      <img id="feed" alt="Switch remote feed">
+      <div id="overlay" class="overlay"></div>
+    </div>
+  </div>
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('token') || '';
+    const feed = document.getElementById('feed');
+    const overlay = document.getElementById('overlay');
+
+    let currentState = null;
+    let eventSource = null;
+    let reconnectTimer = null;
+
+    function command(command, extra = {}) {
+      return fetch('/api/command?token=' + encodeURIComponent(token), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command, ...extra }),
+      });
+    }
+
+    function refreshFeed(cacheBust = false) {
+      const suffix = cacheBust ? ('&t=' + Date.now()) : '';
+      feed.src = '/feed.mjpg?token=' + encodeURIComponent(token) + suffix;
+    }
+
+    function scheduleReconnect() {
+      if (reconnectTimer) return;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        restartStreams(true);
+      }, 1500);
+    }
+
+    function activateSlot(slot) {
+      if (!currentState || !currentState.enabled || !slot || !slot.hasSource) return;
+
+      if (currentState.selectedSlotIndex === slot.index) {
+        command('cut');
+        return;
+      }
+
+      command('select_preview_slot', { slotIndex: slot.index });
+    }
+
+    function renderState(state) {
+      currentState = state;
+      overlay.replaceChildren();
+
+      for (const slot of state.slots || []) {
+        const rect = slot.rect;
+        if (!rect) continue;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'tile-hitbox';
+        button.style.left = (rect.x * 100) + '%';
+        button.style.top = (rect.y * 100) + '%';
+        button.style.width = (rect.width * 100) + '%';
+        button.style.height = (rect.height * 100) + '%';
+        button.title = slot.title || ('Slot ' + (slot.index + 1));
+        button.ariaLabel = slot.title || ('Slot ' + (slot.index + 1));
+        button.disabled = !state.enabled || !slot.hasSource;
+        button.addEventListener('click', () => activateSlot(slot));
+        overlay.appendChild(button);
+      }
+    }
+
+    function connectEvents() {
+      if (eventSource) eventSource.close();
+      eventSource = new EventSource('/events?token=' + encodeURIComponent(token));
+      eventSource.addEventListener('state', (event) => {
+        renderState(JSON.parse(event.data));
+      });
+      eventSource.onerror = () => {
+        scheduleReconnect();
+      };
+    }
+
+    function restartStreams(cacheBust = false) {
+      connectEvents();
+      refreshFeed(cacheBust);
+    }
+
+    feed.addEventListener('error', () => scheduleReconnect());
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) restartStreams(true);
+    });
+
+    restartStreams(false);
+  </script>
+</body>
+</html>

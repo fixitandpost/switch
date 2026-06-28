@@ -10,8 +10,9 @@
       "outputParser": "yolo26-end-to-end-nx6",
       "distribution": "installer-download",
       "installSubdir": "models",
+      "downloadUrl": "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n.onnx",
       "downloadUrlEnv": "SWITCH_MOTION_MODEL_URL",
-      "sha256": "6a20ea5d81085f5e084dbe2b3e4ca013bea8c3a8dc1b99aa42a1f80488bf4d3f",
+      "sha256": "2e947b787d9e787b93a16772a5f55b1d4d8c4d86f53146149c5d6a642442d6f7",
       "notes": "The installer downloads this model into the plugin data path. The repository keeps only this manifest and checksum; do not commit model binaries."
     }
   ]

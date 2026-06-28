@@ -35,6 +35,9 @@ Source: "..\release\Package\*"; DestDir: "{app}"; Flags: ignoreversion recursesu
 Source: "..\LICENSE"; Flags: dontcopy
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 
+[Run]
+Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\data\obs-plugins\{#MyAppName}\scripts\download-motion-model.ps1"" -PluginDataDir ""{app}\data\obs-plugins\{#MyAppName}"""; Flags: runhidden waituntilterminated
+
 [Icons]
 Name: "{group}\{cm:ProgramOnTheWeb,{#MyAppName}}"; Filename: "{#MyAppURL}"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
