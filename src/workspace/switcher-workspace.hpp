@@ -2,6 +2,7 @@
 
 #include <QFrame>
 #include <QPointer>
+#include <QVector>
 #include <QWidget>
 #include <vector>
 
@@ -401,16 +402,20 @@ private:
 	void InstallQuickOutputControls();
 	void RemoveQuickOutputControls();
 	void UpdateQuickOutputControls();
+	void SelectMode(int index, bool force = false);
+	void UpdateModeButtons();
+	void UpdateVerticalPreviewAspect();
+	void PlaceVerticalObsDock();
+	void ToggleQuickOutputProjector(bool multiview);
 	void OpenQuickOutputProjector(bool multiview);
+	void CloseQuickOutputProjector(bool multiview);
+	void TrackQuickOutputProjector(bool multiview, QWidget *window);
+	bool QuickOutputProjectorActive(bool multiview) const;
 	void ShowQuickOutputMonitorMenu(bool multiview);
 
-	enum class QuickOutputActive {
-		None,
-		Multiview,
-		Program,
-	};
-
-	QListWidget *modeList;
+	QFrame *modeList;
+	QVector<QPushButton *> modeButtons;
+	int currentModeIndex = 0;
 	QStackedWidget *modeStack;
 	QWidget *workspaceModePage;
 	QWidget *verticalModePage;
@@ -462,6 +467,7 @@ private:
 	SwitchMotionManager *motionManager;
 	QLineEdit *verticalCanvasNameEdit;
 	QComboBox *verticalPresetCombo;
+	QWidget *verticalCanvasPreviewFrame = nullptr;
 	QCheckBox *verticalLinkedSyncCheckBox;
 	QComboBox *verticalTransitionCombo;
 	QSpinBox *verticalTransitionDurationSpin;
@@ -520,7 +526,8 @@ private:
 	QPointer<QPushButton> quickSwitchButton;
 	int quickMultiviewMonitor = -2;
 	int quickProgramMonitor = -2;
-	QuickOutputActive quickOutputActive = QuickOutputActive::None;
+	QPointer<QWidget> quickMultiviewProjector;
+	QPointer<QWidget> quickProgramProjector;
 	QListWidget *motionProfileList;
 	QPushButton *motionAddButton;
 	QPushButton *motionDeleteButton;

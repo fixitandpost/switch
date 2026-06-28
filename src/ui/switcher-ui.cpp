@@ -8,8 +8,7 @@
 #include <QPalette>
 #include <QPen>
 
-namespace {
-void DrawSwitchModeGlyph(QPainter *painter, const QRect &rect, const QString &glyph, const QColor &color)
+void SwitchUi::DrawModeGlyph(QPainter *painter, const QRect &rect, const QString &glyph, const QColor &color)
 {
 	if (!painter)
 		return;
@@ -64,8 +63,6 @@ void DrawSwitchModeGlyph(QPainter *painter, const QRect &rect, const QString &gl
 	painter->drawLine(QPointF(r.left() + 2.0, r.top() + 2.0), QPointF(r.right() - 2.0, r.bottom() - 2.0));
 	painter->drawLine(QPointF(r.right() - 2.0, r.top() + 2.0), QPointF(r.left() + 2.0, r.bottom() - 2.0));
 }
-
-} // namespace
 
 QColor SwitchUi::WithAlpha(QColor color, int alpha)
 {
@@ -138,7 +135,7 @@ void SwitchModeItemDelegate::paint(QPainter *painter, const QStyleOptionViewItem
 	const QString title = metrics.elidedText(index.data(Qt::DisplayRole).toString(), Qt::ElideRight,
 						 textRect.width());
 
-	DrawSwitchModeGlyph(painter, iconRect, index.data(kSwitchModeGlyphRole).toString(), textColor);
+	SwitchUi::DrawModeGlyph(painter, iconRect, index.data(kSwitchModeGlyphRole).toString(), textColor);
 	painter->setFont(font);
 	painter->setPen(textColor);
 	painter->setClipRect(rowRect);

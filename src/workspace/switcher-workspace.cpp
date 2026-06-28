@@ -41,11 +41,14 @@
 #include <QMainWindow>
 #include <QMenu>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QPushButton>
+#include <QPixmap>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScreen>
 #include <QScopedValueRollback>
+#include <QSet>
 #include <QPalette>
 #include <QShowEvent>
 #include <QHideEvent>
@@ -479,6 +482,184 @@ void SetMinimumControlWidth(std::initializer_list<QWidget *> widgets, int width)
 		if (widget)
 			widget->setMinimumWidth(width);
 	}
+}
+
+QIcon ModeButtonIcon(const QString &glyph, const QColor &color)
+{
+	QPixmap pixmap(24, 24);
+	pixmap.fill(Qt::transparent);
+	QPainter painter(&pixmap);
+	painter.setRenderHint(QPainter::Antialiasing, true);
+	SwitchUi::DrawModeGlyph(&painter, QRect(0, 0, 24, 24), glyph, color);
+	return QIcon(pixmap);
+}
+
+class SwitchAspectRatioFrame : public QWidget {
+public:
+	explicit SwitchAspectRatioFrame(QWidget *child_, QWidget *parent = nullptr) : QWidget(parent), child(child_)
+	{
+		setObjectName(QStringLiteral("switcherAspectFrame"));
+		setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+		setMinimumSize(QSize(220, 360));
+		if (child) {
+			child->setParent(this);
+			child->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored);
+			child->show();
+		}
+	}
+
+	QSize sizeHint() const override { return QSize(360, 640); }
+	QSize minimumSizeHint() const override { return QSize(220, 360); }
+
+	void SetAspectSize(const QSize &size)
+	{
+		if (size.width() <= 0 || size.height() <= 0)
+			aspectSize = QSize(9, 16);
+		else
+			aspectSize = size;
+		updateGeometry();
+		UpdateChildGeometry();
+	}
+
+	void SetMaximumPreviewWidth(int width)
+	{
+		maximumPreviewWidth = std::max(0, width);
+		UpdateChildGeometry();
+	}
+
+protected:
+	void resizeEvent(QResizeEvent *event) override
+	{
+		QWidget::resizeEvent(event);
+		UpdateChildGeometry();
+	}
+
+private:
+	void UpdateChildGeometry()
+	{
+		if (!child)
+			return;
+
+		const QSize safeAspect = aspectSize.isValid() ? aspectSize : QSize(9, 16);
+		const QRect area = rect();
+		if (area.width() <= 0 || area.height() <= 0)
+			return;
+
+		int availableWidth = area.width();
+		if (maximumPreviewWidth > 0)
+			availableWidth = std::min(availableWidth, maximumPreviewWidth);
+		int targetWidth = std::max(1, availableWidth);
+		int targetHeight = std::max(1, int(std::round(double(targetWidth) * double(safeAspect.height()) /
+							      double(std::max(1, safeAspect.width())))));
+
+		if (targetHeight > area.height()) {
+			targetHeight = std::max(1, area.height());
+			targetWidth = std::max(1, int(std::round(double(targetHeight) * double(safeAspect.width()) /
+								  double(std::max(1, safeAspect.height())))));
+		}
+
+		const int left = area.left() + (area.width() - targetWidth) / 2;
+		const int top = area.top() + (area.height() - targetHeight) / 2;
+		child->setGeometry(left, top, targetWidth, targetHeight);
+	}
+
+	QWidget *child = nullptr;
+	QSize aspectSize = QSize(9, 16);
+	int maximumPreviewWidth = 420;
+};
+
+QSet<QWidget *> TopLevelWidgetSet()
+{
+	QSet<QWidget *> widgets;
+	for (auto *widget : QApplication::topLevelWidgets()) {
+		if (widget)
+			widgets.insert(widget);
+	}
+	return widgets;
+}
+
+QString WindowDescriptor(QWidget *widget)
+{
+	if (!widget)
+		return {};
+
+	QStringList parts;
+	parts << widget->windowTitle() << widget->objectName();
+	if (widget->metaObject())
+		parts << QString::fromLatin1(widget->metaObject()->className());
+	return parts.join(QStringLiteral(" ")).toLower();
+}
+
+bool DescriptorMatchesQuickOutput(const QString &descriptor, bool multiview)
+{
+	if (multiview)
+		return descriptor.contains(QStringLiteral("multiview")) ||
+		       descriptor.contains(QStringLiteral("multi view")) ||
+		       descriptor.contains(QStringLiteral("multi-view"));
+
+	return descriptor.contains(QStringLiteral("program")) || descriptor.contains(QStringLiteral("studio"));
+}
+
+bool IsProjectorCandidate(QWidget *widget)
+{
+	if (!widget || qobject_cast<QMenu *>(widget))
+		return false;
+	const QString descriptor = WindowDescriptor(widget);
+	if (descriptor.contains(QStringLiteral("tooltip")) || descriptor.contains(QStringLiteral("menu")))
+		return false;
+	return descriptor.contains(QStringLiteral("projector")) || descriptor.contains(QStringLiteral("multiview")) ||
+	       descriptor.contains(QStringLiteral("program"));
+}
+
+QWidget *FindQuickOutputProjectorWindow(bool multiview, const QSet<QWidget *> &excluded = {})
+{
+	QWidget *projectorFallback = nullptr;
+	QWidget *newWindowFallback = nullptr;
+	int newWindowCount = 0;
+
+	for (auto *widget : QApplication::topLevelWidgets()) {
+		if (!widget || excluded.contains(widget) || !widget->isWindow())
+			continue;
+		if (qobject_cast<QMenu *>(widget))
+			continue;
+
+		const QString descriptor = WindowDescriptor(widget);
+		if (IsProjectorCandidate(widget) && DescriptorMatchesQuickOutput(descriptor, multiview))
+			return widget;
+		if (!excluded.isEmpty() && IsProjectorCandidate(widget) && !projectorFallback)
+			projectorFallback = widget;
+		if (!excluded.isEmpty() && widget->isVisible()) {
+			newWindowFallback = widget;
+			newWindowCount++;
+		}
+	}
+
+	if (projectorFallback)
+		return projectorFallback;
+	if (!excluded.isEmpty() && newWindowCount == 1)
+		return newWindowFallback;
+	return nullptr;
+}
+
+QDockWidget *FindDockWidgetByTerms(QMainWindow *mainWindow, const QStringList &terms, QDockWidget *excluded)
+{
+	if (!mainWindow)
+		return nullptr;
+
+	for (auto *dock : mainWindow->findChildren<QDockWidget *>()) {
+		if (!dock || dock == excluded)
+			continue;
+		const QString descriptor = QStringLiteral("%1 %2")
+						   .arg(dock->windowTitle(), dock->objectName())
+						   .toLower();
+		if (descriptor.contains(QStringLiteral("switch vertical")))
+			continue;
+		for (const auto &term : terms) {
+			if (descriptor.contains(term))
+				return dock;
+		}
+	}
+	return nullptr;
 }
 
 QPointer<QDockWidget> RegisterObsDockWidget(QMainWindow *mainWindow, QWidget *widget, const char *dockId,
@@ -964,10 +1145,11 @@ public:
 		statusLabel->setObjectName(QStringLiteral("switcherVerticalPreviewStatus"));
 		statusLabel->setWordWrap(true);
 		preview->SetCanvasId(workspace ? workspace->VerticalCanvasId() : QString());
-		preview->setMinimumSize(QSize(220, 360));
 		preview->setObjectName(QStringLiteral("switcherVerticalCanvasPreview"));
 		preview->SetRenderingEnabled(false);
 		preview->hide();
+		previewFrame = new SwitchAspectRatioFrame(preview, previewCard);
+		previewFrame->SetMaximumPreviewWidth(360);
 		menuButton->setObjectName(QStringLiteral("switcherVerticalDockMenuButton"));
 		menuButton->setText(QStringLiteral("Controls"));
 		menuButton->setPopupMode(QToolButton::InstantPopup);
@@ -976,7 +1158,7 @@ public:
 		menuButton->setMinimumHeight(32);
 
 		if (kPreviewEnabled)
-			previewLayout->addWidget(preview, 1);
+			previewLayout->addWidget(previewFrame, 1);
 		else
 			previewLayout->addStretch(1);
 		auto *footerLayout = new QHBoxLayout;
@@ -1039,6 +1221,8 @@ public:
 			return;
 
 		const auto descriptor = workspace->CanvasDescriptorForId(workspace->VerticalCanvasId());
+		if (previewFrame)
+			previewFrame->SetAspectSize(descriptor.size);
 		const QString sceneName =
 			descriptor.activeSceneName.isEmpty() ? QStringLiteral("No vertical scene selected") : descriptor.activeSceneName;
 		QStringList liveStates;
@@ -1107,6 +1291,7 @@ private:
 
 	SwitcherWorkspaceDock *workspace = nullptr;
 	SwitchCanvasPreview *preview = nullptr;
+	SwitchAspectRatioFrame *previewFrame = nullptr;
 	QLabel *statusLabel = nullptr;
 	QToolButton *menuButton = nullptr;
 	QMenu *controlsMenu = nullptr;
@@ -2290,7 +2475,7 @@ QString SwitcherWorkspaceSlot::DefaultTitle() const
 
 SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	: QWidget(parent, Qt::Window),
-		  modeList(new QListWidget(this)),
+		  modeList(new QFrame(this)),
 		  modeStack(new QStackedWidget(this)),
 		  workspaceModePage(new QWidget(modeStack)),
 		  verticalModePage(new QWidget(modeStack)),
@@ -2373,26 +2558,29 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 
 	modeList->setObjectName(QStringLiteral("switcherModeList"));
 	modeList->setFrameShape(QFrame::NoFrame);
-	modeList->setIconSize(QSize(24, 24));
-	modeList->setUniformItemSizes(true);
-	modeList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-	modeList->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-	modeList->setSelectionMode(QAbstractItemView::SingleSelection);
-	modeList->setMouseTracking(true);
-	modeList->setSpacing(0);
-	modeList->setItemDelegate(new SwitchModeItemDelegate(modeList));
+	auto *modeListLayout = new QVBoxLayout(modeList);
+	modeListLayout->setContentsMargins(0, 0, 0, 0);
+	modeListLayout->setSpacing(0);
 
-	const auto addModeItem = [this](const QString &title, const QString &glyph) {
-		auto *item = new QListWidgetItem(title, modeList);
-		item->setData(kSwitchModeGlyphRole, glyph);
-		item->setSizeHint(QSize(0, 52));
+	const auto addModeButton = [this, modeListLayout](int index, const QString &title, const QString &glyph) {
+		auto *button = new QPushButton(title, modeList);
+		button->setObjectName(QStringLiteral("switcherModeButton"));
+		button->setProperty("switchModeGlyph", glyph);
+		button->setCheckable(true);
+		button->setCursor(Qt::PointingHandCursor);
+		button->setIconSize(QSize(24, 24));
+		button->setMinimumHeight(52);
+		button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+		modeListLayout->addWidget(button);
+		modeButtons.push_back(button);
+		connect(button, &QPushButton::clicked, this, [this, index]() { SelectMode(index); });
 	};
-	addModeItem(QStringLiteral("Workspace"), QStringLiteral("workspace"));
-	addModeItem(QStringLiteral("Vertical"), QStringLiteral("vertical"));
-	addModeItem(QStringLiteral("Motion"), QStringLiteral("motion"));
-	addModeItem(QStringLiteral("Automation"), QStringLiteral("automation"));
-	addModeItem(QT_UTF8(obs_module_text("SwitcherRemote")), QStringLiteral("remote"));
-	modeList->setFixedHeight(modeList->count() * 52 + 2 * modeList->frameWidth());
+	addModeButton(0, QStringLiteral("Workspace"), QStringLiteral("workspace"));
+	addModeButton(1, QStringLiteral("Vertical"), QStringLiteral("vertical"));
+	addModeButton(2, QStringLiteral("Motion"), QStringLiteral("motion"));
+	addModeButton(3, QStringLiteral("Automation"), QStringLiteral("automation"));
+	addModeButton(4, QT_UTF8(obs_module_text("SwitcherRemote")), QStringLiteral("remote"));
+	modeList->setFixedHeight(modeButtons.size() * 52);
 	modeRailLayout->addWidget(modeList);
 	modeRailLayout->addStretch(1);
 
@@ -2699,6 +2887,8 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	};
 
 	auto *verticalPreviewColumn = new QWidget(verticalModePage);
+	verticalPreviewColumn->setMinimumWidth(320);
+	verticalPreviewColumn->setMaximumWidth(520);
 	auto *verticalPreviewColumnLayout = new QVBoxLayout(verticalPreviewColumn);
 	verticalPreviewColumnLayout->setContentsMargins(0, 0, 0, 0);
 	verticalPreviewColumnLayout->setSpacing(20);
@@ -2706,10 +2896,11 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	auto [previewCard, previewCardLayout] = makeVerticalPanel(verticalPreviewColumn, QStringLiteral("Vertical Canvas"));
 	verticalCanvasStatusLabel->setObjectName(QStringLiteral("switcherVerticalPreviewStatus"));
 	verticalCanvasPreview->setObjectName(QStringLiteral("switcherVerticalCanvasPreview"));
-	verticalCanvasPreview->setMinimumWidth(360);
+	verticalCanvasPreviewFrame = new SwitchAspectRatioFrame(verticalCanvasPreview, previewCard);
+	static_cast<SwitchAspectRatioFrame *>(verticalCanvasPreviewFrame)->SetMaximumPreviewWidth(420);
 	previewCard->setObjectName(QStringLiteral("switcherVerticalPreviewCard"));
 	previewCardLayout->addWidget(verticalCanvasStatusLabel);
-	previewCardLayout->addWidget(verticalCanvasPreview, 1);
+	previewCardLayout->addWidget(verticalCanvasPreviewFrame, 1);
 
 	for (auto *button : {verticalSceneDockButton, verticalScenesDockButton, verticalSourcesDockButton,
 			     verticalTransitionsDockButton, verticalSettingsDockButton, verticalSceneOpenWindowButton,
@@ -2856,8 +3047,8 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 
 	verticalRailLayout->addWidget(verticalSurfaceTabs, 1);
 
-	verticalLayout->addWidget(verticalPreviewColumn, 1);
-	verticalLayout->addWidget(verticalRail, 0);
+	verticalLayout->addWidget(verticalPreviewColumn, 0);
+	verticalLayout->addWidget(verticalRail, 1);
 
 	motionProfileList = new QListWidget(motionModePage);
 	motionAddButton = new QPushButton(QStringLiteral("Add Profile"), motionModePage);
@@ -3672,7 +3863,6 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	connect(inspectorCloseButton, &QToolButton::clicked, this, &SwitcherWorkspaceDock::HideSettingsPanel);
 	connect(SwitcherRemoteManager::Instance(), &SwitcherRemoteManager::StateChanged, this,
 		&SwitcherWorkspaceDock::RemoteStateUpdated);
-	connect(modeList, &QListWidget::currentRowChanged, this, &SwitcherWorkspaceDock::ModeChanged);
 	connect(verticalCanvasNameEdit, &QLineEdit::textEdited, this, &SwitcherWorkspaceDock::VerticalCanvasNameChanged);
 	connect(verticalPresetCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &SwitcherWorkspaceDock::VerticalPresetChanged);
 	connect(verticalTransitionCombo, qOverload<int>(&QComboBox::currentIndexChanged), this,
@@ -4293,8 +4483,7 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	RefreshAutomationPage();
 	RefreshSettingsPanelMode();
 	UpdateInspectorVisibility(false);
-	modeList->setCurrentRow(0);
-	modeStack->setCurrentWidget(workspaceModePage);
+	SelectMode(0, true);
 	ApplyTheme();
 }
 
@@ -4358,7 +4547,7 @@ void SwitcherWorkspaceDock::InstallQuickOutputControls()
 		rowLayout->addWidget(config, 0);
 		containerLayout->addWidget(row);
 
-		connect(action, &QPushButton::clicked, this, [this, multiview]() { OpenQuickOutputProjector(multiview); });
+		connect(action, &QPushButton::clicked, this, [this, multiview]() { ToggleQuickOutputProjector(multiview); });
 		connect(config, &QPushButton::clicked, this, [this, multiview]() { ShowQuickOutputMonitorMenu(multiview); });
 
 		*actionButton = action;
@@ -4412,7 +4601,6 @@ void SwitcherWorkspaceDock::RemoveQuickOutputControls()
 	quickMultiviewConfigButton = nullptr;
 	quickProgramButton = nullptr;
 	quickProgramConfigButton = nullptr;
-	quickOutputActive = QuickOutputActive::None;
 	if (quickSwitchButton)
 		delete quickSwitchButton.data();
 	quickSwitchButton = nullptr;
@@ -4424,13 +4612,13 @@ void SwitcherWorkspaceDock::UpdateQuickOutputControls()
 	const int programMonitor = EffectiveQuickOutputMonitor(quickProgramMonitor);
 	const QString multiviewTarget = MonitorLabel(multiviewMonitor);
 	const QString programTarget = MonitorLabel(programMonitor);
-	const bool multiviewActive = quickOutputActive == QuickOutputActive::Multiview;
-	const bool programActive = quickOutputActive == QuickOutputActive::Program;
+	const bool multiviewActive = QuickOutputProjectorActive(true);
+	const bool programActive = QuickOutputProjectorActive(false);
 
 	if (quickMultiviewButton) {
 		quickMultiviewButton->setText(QStringLiteral("Multi View"));
 		quickMultiviewButton->setToolTip(multiviewActive
-							 ? QStringLiteral("OBS Multi View is displaying on %1").arg(multiviewTarget)
+							 ? QStringLiteral("Close OBS Multi View output on %1").arg(multiviewTarget)
 							 : QStringLiteral("Open OBS Multi View on %1").arg(multiviewTarget));
 	}
 	if (quickMultiviewConfigButton)
@@ -4441,7 +4629,7 @@ void SwitcherWorkspaceDock::UpdateQuickOutputControls()
 	if (quickProgramButton) {
 		quickProgramButton->setText(QStringLiteral("Program Out"));
 		quickProgramButton->setToolTip(programActive
-						       ? QStringLiteral("OBS Program output is displaying on %1")
+						       ? QStringLiteral("Close OBS Program output on %1")
 								 .arg(programTarget)
 						       : QStringLiteral("Open OBS Program output on %1").arg(programTarget));
 	}
@@ -4459,11 +4647,93 @@ void SwitcherWorkspaceDock::UpdateQuickOutputControls()
 	ApplyQuickOutputActiveStyle(quickProgramConfigButton, programActive, false);
 }
 
+bool SwitcherWorkspaceDock::QuickOutputProjectorActive(bool multiview) const
+{
+	const QPointer<QWidget> projector = multiview ? quickMultiviewProjector : quickProgramProjector;
+	return projector && projector->isVisible();
+}
+
+void SwitcherWorkspaceDock::TrackQuickOutputProjector(bool multiview, QWidget *window)
+{
+	QPointer<QWidget> &projector = multiview ? quickMultiviewProjector : quickProgramProjector;
+	if (projector == window)
+		return;
+
+	projector = window;
+	if (window) {
+		connect(window, &QObject::destroyed, this, [this, multiview, window]() {
+			QPointer<QWidget> &stored = multiview ? quickMultiviewProjector : quickProgramProjector;
+			if (stored == window)
+				stored = nullptr;
+			UpdateQuickOutputControls();
+		});
+	}
+	UpdateQuickOutputControls();
+}
+
+void SwitcherWorkspaceDock::CloseQuickOutputProjector(bool multiview)
+{
+	QPointer<QWidget> &projector = multiview ? quickMultiviewProjector : quickProgramProjector;
+	QWidget *window = projector;
+	if (!window)
+		window = FindQuickOutputProjectorWindow(multiview);
+	if (!window)
+		return;
+
+	TrackQuickOutputProjector(multiview, window);
+	window->close();
+	QPointer<QWidget> watched(window);
+	QTimer::singleShot(150, this, [this, multiview, watched]() {
+		QPointer<QWidget> &stored = multiview ? quickMultiviewProjector : quickProgramProjector;
+		if (stored == watched && (!watched || !watched->isVisible()))
+			stored = nullptr;
+		UpdateQuickOutputControls();
+	});
+}
+
 void SwitcherWorkspaceDock::OpenQuickOutputProjector(bool multiview)
 {
+	if (frontendShuttingDown)
+		return;
+
+	if (auto *existing = FindQuickOutputProjectorWindow(multiview)) {
+		TrackQuickOutputProjector(multiview, existing);
+		if (existing->isMinimized())
+			existing->showNormal();
+		existing->raise();
+		existing->activateWindow();
+		return;
+	}
+
 	const int monitor = EffectiveQuickOutputMonitor(multiview ? quickMultiviewMonitor : quickProgramMonitor);
+	const auto existingWindows = TopLevelWidgetSet();
 	obs_frontend_open_projector(multiview ? "Multiview" : "StudioProgram", monitor, nullptr, nullptr);
-	quickOutputActive = multiview ? QuickOutputActive::Multiview : QuickOutputActive::Program;
+
+	const auto captureProjector = [this, multiview, existingWindows]() {
+		QPointer<QWidget> &stored = multiview ? quickMultiviewProjector : quickProgramProjector;
+		if (stored && stored->isVisible()) {
+			UpdateQuickOutputControls();
+			return;
+		}
+		if (auto *window = FindQuickOutputProjectorWindow(multiview, existingWindows))
+			TrackQuickOutputProjector(multiview, window);
+		else
+			UpdateQuickOutputControls();
+	};
+	QTimer::singleShot(0, this, captureProjector);
+	QTimer::singleShot(150, this, captureProjector);
+	QTimer::singleShot(600, this, captureProjector);
+	UpdateQuickOutputControls();
+}
+
+void SwitcherWorkspaceDock::ToggleQuickOutputProjector(bool multiview)
+{
+	if (QuickOutputProjectorActive(multiview) || FindQuickOutputProjectorWindow(multiview)) {
+		CloseQuickOutputProjector(multiview);
+		return;
+	}
+
+	OpenQuickOutputProjector(multiview);
 	UpdateQuickOutputControls();
 }
 
@@ -4506,10 +4776,19 @@ void SwitcherWorkspaceDock::ShowQuickOutputMonitorMenu(bool multiview)
 	if (selectedIndex < 0 || selectedIndex >= static_cast<int>(monitors.size()))
 		return;
 
+	const bool shouldReopen = QuickOutputProjectorActive(multiview) || FindQuickOutputProjectorWindow(multiview);
 	if (multiview)
 		quickMultiviewMonitor = monitors[selectedIndex];
 	else
 		quickProgramMonitor = monitors[selectedIndex];
+
+	if (shouldReopen) {
+		CloseQuickOutputProjector(multiview);
+		QTimer::singleShot(250, this, [this, multiview]() {
+			if (!frontendShuttingDown)
+				OpenQuickOutputProjector(multiview);
+		});
+	}
 	UpdateQuickOutputControls();
 	emit WorkspaceStateChanged();
 }
@@ -4641,7 +4920,7 @@ obs_data_t *SwitcherWorkspaceDock::SaveState()
 	obs_data_set_bool(data, "visible", isVisible());
 	obs_data_set_bool(data, "inspector_visible", inspectorFrame->isVisible());
 	obs_data_set_int(data, "inspector_width", inspectorFrame->isVisible() ? inspectorFrame->width() : inspectorWidth);
-	obs_data_set_int(data, "mode_index", modeList ? modeList->currentRow() : 0);
+	obs_data_set_int(data, "mode_index", currentModeIndex);
 	obs_data_set_int(data, "quick_multiview_monitor", quickMultiviewMonitor);
 	obs_data_set_int(data, "quick_program_monitor", quickProgramMonitor);
 	if (workspacePlacementInitialized)
@@ -4726,11 +5005,7 @@ void SwitcherWorkspaceDock::LoadState(obs_data_t *data)
 	if (motionData)
 		obs_data_release(motionData);
 
-	{
-		QSignalBlocker modeBlocker(modeList);
-		modeList->setCurrentRow(modeIndex);
-	}
-	ModeChanged(modeIndex);
+	SelectMode(modeIndex, true);
 	UpdateQuickOutputControls();
 
 	RemoteStateUpdated();
@@ -4802,7 +5077,7 @@ void SwitcherWorkspaceDock::HandleFrontendEvent(enum obs_frontend_event event)
 		frontendFinishedLoading = true;
 		frontendShuttingDown = false;
 		frontendExiting = false;
-		if (modeList->currentRow() == 1 && canvasManager)
+		if (currentModeIndex == 1 && canvasManager)
 			canvasManager->EnsureVerticalCanvas();
 		if (motionManager)
 			motionManager->ApplyBindings();
@@ -5672,17 +5947,20 @@ void SwitcherWorkspaceDock::ApplyTheme()
 		"  border: 0px;"
 		"  outline: none;"
 		"}"
-			"#switcherModeList::item {"
-			"  color: @WINDOW_TEXT@;"
-			"  border: 1px solid transparent;"
-			"  border-radius: 4px;"
-			"  padding: 10px 12px;"
-			"}"
-		"#switcherModeList::item:hover {"
+		"QPushButton#switcherModeButton {"
+		"  background-color: transparent;"
+		"  color: @WINDOW_TEXT@;"
+		"  border: 1px solid transparent;"
+		"  border-radius: 4px;"
+		"  padding: 10px 12px;"
+		"  text-align: left;"
+		"  font-weight: 700;"
+		"}"
+		"QPushButton#switcherModeButton:hover {"
 		"  background-color: @HOVER_FILL@;"
 		"  border-color: @HOVER_BORDER@;"
 		"}"
-		"#switcherModeList::item:selected {"
+		"QPushButton#switcherModeButton:checked {"
 		"  background-color: @SELECT_BORDER@;"
 		"  color: @BUTTON_TEXT@;"
 		"  border-color: @SELECT_BORDER@;"
@@ -6079,6 +6357,7 @@ void SwitcherWorkspaceDock::ApplyTheme()
 		if (verticalSettingsObsDockWidget)
 			verticalSettingsObsDockWidget->setStyleSheet(styleSheet);
 	}
+	UpdateModeButtons();
 }
 
 OBSSource SwitcherWorkspaceDock::SlotSource(int index) const
@@ -6318,6 +6597,38 @@ bool SwitcherWorkspaceDock::OpenCanvasProjector(const QString &canvasId)
 	return canvasManager && canvasManager->OpenProjector(canvasId);
 }
 
+void SwitcherWorkspaceDock::UpdateVerticalPreviewAspect()
+{
+	const QSize size =
+		canvasManager ? canvasManager->CanvasSize(canvasManager->VerticalCanvasId()) : QSize(1080, 1920);
+	if (verticalCanvasPreviewFrame)
+		static_cast<SwitchAspectRatioFrame *>(verticalCanvasPreviewFrame)->SetAspectSize(size);
+	if (verticalObsDockWidget)
+		verticalObsDockWidget->Refresh(false);
+}
+
+void SwitcherWorkspaceDock::PlaceVerticalObsDock()
+{
+	auto *mainWindow = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+	if (!mainWindow || !verticalObsDockContainer)
+		return;
+
+	verticalObsDockContainer->setFloating(false);
+	verticalObsDockContainer->setMinimumWidth(300);
+	verticalObsDockContainer->setMinimumHeight(420);
+	verticalObsDockContainer->setAllowedAreas(Qt::AllDockWidgetAreas);
+
+	QDockWidget *targetDock = FindDockWidgetByTerms(mainWindow,
+							{QStringLiteral("program"), QStringLiteral("preview")},
+							verticalObsDockContainer);
+	if (targetDock)
+		mainWindow->splitDockWidget(targetDock, verticalObsDockContainer, Qt::Horizontal);
+	else
+		mainWindow->addDockWidget(Qt::RightDockWidgetArea, verticalObsDockContainer);
+
+	mainWindow->resizeDocks(QList<QDockWidget *>{verticalObsDockContainer.data()}, QList<int>{360}, Qt::Horizontal);
+}
+
 bool SwitcherWorkspaceDock::EnsureVerticalObsDock(bool visible)
 {
 	auto *mainWindow = static_cast<QMainWindow *>(obs_frontend_get_main_window());
@@ -6356,12 +6667,13 @@ bool SwitcherWorkspaceDock::EnsureVerticalObsDock(bool visible)
 		return false;
 
 	verticalObsDockWidget->SetPreviewRenderingEnabled(visible && !isVisible());
+	UpdateVerticalPreviewAspect();
 	RefreshVerticalObsDock();
 	if (visible) {
 		if (verticalCanvasPreview)
 			verticalCanvasPreview->SetRenderingEnabled(false);
 		verticalObsDockWidget->SetPreviewRenderingEnabled(!isVisible());
-		verticalObsDockContainer->setFloating(false);
+		PlaceVerticalObsDock();
 		verticalObsDockContainer->show();
 		verticalObsDockContainer->raise();
 	} else {
@@ -7568,6 +7880,37 @@ void SwitcherWorkspaceDock::BindSelectedMotionShot()
 	}
 }
 
+void SwitcherWorkspaceDock::SelectMode(int index, bool force)
+{
+	const int maximumIndex = std::max(0, static_cast<int>(modeButtons.size()) - 1);
+	const int nextIndex = std::clamp(index, 0, maximumIndex);
+	if (!force && currentModeIndex == nextIndex && modeStack->currentIndex() == nextIndex) {
+		UpdateModeButtons();
+		return;
+	}
+
+	currentModeIndex = nextIndex;
+	UpdateModeButtons();
+	ModeChanged(currentModeIndex);
+}
+
+void SwitcherWorkspaceDock::UpdateModeButtons()
+{
+	const QPalette pal = palette();
+	for (int index = 0; index < modeButtons.size(); index++) {
+		auto *button = modeButtons.at(index);
+		if (!button)
+			continue;
+		const bool active = index == currentModeIndex;
+		const QSignalBlocker blocker(button);
+		button->setChecked(active);
+		const QColor iconColor =
+			active ? pal.color(QPalette::HighlightedText) : pal.color(QPalette::WindowText);
+		button->setIcon(ModeButtonIcon(button->property("switchModeGlyph").toString(), iconColor));
+		button->setToolTip(button->text());
+	}
+}
+
 void SwitcherWorkspaceDock::ModeChanged(int index)
 {
 	switch (index) {
@@ -7634,6 +7977,7 @@ void SwitcherWorkspaceDock::VerticalPresetChanged(int)
 
 	const QSize size = verticalPresetCombo->currentData().toSize();
 	canvasManager->SetVerticalPreset(size, verticalPresetCombo->currentText());
+	UpdateVerticalPreviewAspect();
 }
 
 void SwitcherWorkspaceDock::VerticalSceneSelectionChanged()
@@ -8698,6 +9042,7 @@ void SwitcherWorkspaceDock::RefreshVerticalPage()
 	QScopedValueRollback<bool> guard(loadingVerticalUi, true);
 
 	const auto descriptor = canvasManager->CanvasDescriptor(canvasManager->VerticalCanvasId());
+	UpdateVerticalPreviewAspect();
 	verticalCanvasNameEdit->setText(descriptor.name);
 	const int presetIndex = verticalPresetCombo->findData(descriptor.size);
 	if (presetIndex >= 0)
