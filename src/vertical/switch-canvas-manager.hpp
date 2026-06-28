@@ -139,6 +139,7 @@ public:
 	bool CreateVerticalScene(const QString &baseName, QString *createdName = nullptr);
 	bool DuplicateVerticalScene(const QString &sceneUuidOrName, const QString &baseName, QString *createdName = nullptr);
 	bool RenameVerticalScene(const QString &sceneUuidOrName, const QString &name);
+	bool CanRemoveVerticalScene(const QString &sceneUuidOrName, QString *reason = nullptr) const;
 	bool RemoveVerticalScene(const QString &sceneName);
 	bool SetLinkedScene(const QString &mainSceneUuid, const QString &mainSceneName, const QString &targetSceneUuid,
 			    const QString &targetSceneName);

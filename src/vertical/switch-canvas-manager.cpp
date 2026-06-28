@@ -1108,10 +1108,63 @@ bool SwitchCanvasManager::RenameVerticalScene(const QString &sceneUuidOrName, co
 	return true;
 }
 
+bool SwitchCanvasManager::CanRemoveVerticalScene(const QString &sceneUuidOrName, QString *reason) const
+{
+	auto setReason = [reason](const QString &message) {
+		if (reason)
+			*reason = message;
+	};
+
+	if (sceneUuidOrName.trimmed().isEmpty()) {
+		setReason(QStringLiteral("No vertical scene was selected."));
+		return false;
+	}
+
+	const auto scenes = ScenesForCanvas(VerticalCanvasId());
+	if (scenes.size() <= 1) {
+		setReason(QStringLiteral("Switch keeps one vertical scene available so the vertical canvas cannot go blank."));
+		return false;
+	}
+
+	QString targetUuid;
+	QString targetName;
+	for (const auto &scene : scenes) {
+		if (scene.uuid == sceneUuidOrName || scene.name == sceneUuidOrName) {
+			targetUuid = scene.uuid;
+			targetName = scene.name;
+			break;
+		}
+	}
+
+	if (targetName.isEmpty()) {
+		setReason(QStringLiteral("The selected vertical scene no longer exists."));
+		return false;
+	}
+
+	const auto descriptor = CanvasDescriptor(VerticalCanvasId());
+	const bool activeByUuid = !targetUuid.isEmpty() && descriptor.activeSceneUuid == targetUuid;
+	const bool activeByName = descriptor.activeSceneName == targetName;
+	if (activeByUuid || activeByName) {
+		setReason(QStringLiteral("The live vertical scene cannot be removed while it is displayed."));
+		return false;
+	}
+
+	setReason(QString());
+	return true;
+}
+
 bool SwitchCanvasManager::RemoveVerticalScene(const QString &sceneName)
 {
 	if (!EnsureVerticalCanvas() || sceneName.isEmpty())
 		return false;
+
+	QString refusalReason;
+	if (!CanRemoveVerticalScene(sceneName, &refusalReason)) {
+		blog(LOG_WARNING, "[Switch] Refused to remove vertical scene '%s': %s", sceneName.toUtf8().constData(),
+		     refusalReason.toUtf8().constData());
+		return false;
+	}
+
 	SuspendCanvasRendering();
 
 	obs_source_t *sceneSource = ResolveCanvasScene(verticalCanvas, sceneName);
@@ -1120,19 +1173,33 @@ bool SwitchCanvasManager::RemoveVerticalScene(const QString &sceneName)
 		return false;
 	}
 
+	const QString resolvedName = QString::fromUtf8(obs_source_get_name(sceneSource));
+	const QString resolvedUuid = QString::fromUtf8(obs_source_get_uuid(sceneSource));
 	obs_scene_t *scene = obs_scene_from_source(sceneSource);
-	obs_source_release(sceneSource);
 	if (!scene) {
+		obs_source_release(sceneSource);
 		ScheduleCanvasRenderingResume();
 		return false;
 	}
 
 	obs_canvas_scene_remove(scene);
-	verticalSceneNames.removeAll(sceneName);
+	obs_source_release(sceneSource);
+	verticalSceneNames.erase(std::remove_if(verticalSceneNames.begin(), verticalSceneNames.end(),
+						[&](const QString &name) {
+							return name.compare(resolvedName, Qt::CaseInsensitive) == 0 ||
+							       name.compare(sceneName, Qt::CaseInsensitive) == 0;
+						}),
+				 verticalSceneNames.end());
+	links.erase(std::remove_if(links.begin(), links.end(),
+				   [&](const SwitchCanvasLink &link) {
+					   return link.targetSceneUuid == resolvedUuid || link.targetSceneName == resolvedName ||
+						  link.targetSceneName == sceneName;
+				   }),
+		    links.end());
 	RebuildVerticalSceneCache();
 
 	const int index = FindCanvasIndex(VerticalCanvasId());
-	if (index >= 0 && canvases[index].activeSceneName == sceneName) {
+	if (index >= 0 && (canvases[index].activeSceneName == resolvedName || canvases[index].activeSceneUuid == resolvedUuid)) {
 		canvases[index].activeSceneName.clear();
 		canvases[index].activeSceneUuid.clear();
 		if (!verticalSceneNames.isEmpty())

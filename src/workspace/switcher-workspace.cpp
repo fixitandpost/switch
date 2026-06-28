@@ -103,6 +103,12 @@ constexpr int kMotionShotSceneNameRole = Qt::UserRole + 41;
 constexpr int kMotionShotItemIdRole = Qt::UserRole + 42;
 constexpr int kMotionShotSourceUuidRole = Qt::UserRole + 43;
 constexpr int kMotionShotSourceNameRole = Qt::UserRole + 44;
+constexpr int kVerticalFeedModeRole = Qt::UserRole + 50;
+constexpr int kVerticalFeedUuidRole = Qt::UserRole + 51;
+constexpr int kVerticalFeedNameRole = Qt::UserRole + 52;
+constexpr auto kVerticalFeedProgram = "program";
+constexpr auto kVerticalFeedScene = "scene";
+constexpr auto kVerticalFeedSource = "source";
 SwitcherWorkspaceDock *gWorkspaceDock = nullptr;
 
 QEvent::Type ObsDockClosedEventType()
@@ -230,6 +236,33 @@ bool AddMotionSourceOption(void *data, obs_source_t *source)
 		return true;
 
 	combo->addItem(QString::fromUtf8(name), QString::fromUtf8(uuid));
+	return true;
+}
+
+struct VerticalFeedSourceOption {
+	QString uuid;
+	QString name;
+};
+
+bool CollectVerticalFeedSourceOption(void *data, obs_source_t *source)
+{
+	auto *sources = static_cast<QVector<VerticalFeedSourceOption> *>(data);
+	if (!sources || !source)
+		return true;
+
+	const char *uuid = obs_source_get_uuid(source);
+	const char *name = obs_source_get_name(source);
+	if (!uuid || !*uuid || !name || !*name)
+		return true;
+
+	if (obs_source_get_type(source) == OBS_SOURCE_TYPE_SCENE)
+		return true;
+
+	const uint32_t flags = obs_source_get_output_flags(source);
+	if ((flags & OBS_SOURCE_VIDEO) == 0)
+		return true;
+
+	sources->push_back({QString::fromUtf8(uuid), QString::fromUtf8(name)});
 	return true;
 }
 
@@ -685,6 +718,22 @@ struct CanvasSourceCollector {
 	QVector<SwitchCanvasSourceDescriptor> *sources = nullptr;
 	int depth = 0;
 };
+
+struct SceneItemRemovalCollector {
+	QVector<obs_sceneitem_t *> items;
+};
+
+bool CollectSceneItemsForRemoval(obs_scene_t *scene, obs_sceneitem_t *item, void *data)
+{
+	UNUSED_PARAMETER(scene);
+	auto *collector = static_cast<SceneItemRemovalCollector *>(data);
+	if (!collector || !item)
+		return true;
+
+	obs_sceneitem_addref(item);
+	collector->items.push_back(item);
+	return true;
+}
 
 bool CollectCanvasSourceItems(obs_scene_t *scene, obs_sceneitem_t *item, void *data)
 {
@@ -1406,8 +1455,12 @@ public:
 		connect(removeButton, &QPushButton::clicked, this, [this]() {
 			if (workspace) {
 				const QString sceneId = SelectedSceneId();
-				if (!sceneId.isEmpty())
+				QString reason;
+				if (!sceneId.isEmpty() && workspace->CanvasManager() &&
+				    workspace->CanvasManager()->CanRemoveVerticalScene(sceneId, &reason))
 					workspace->DeleteCanvasScene(workspace->VerticalCanvasId(), sceneId);
+				else if (!reason.isEmpty())
+					removeButton->setToolTip(reason);
 			}
 		});
 		connect(linkButton, &QPushButton::clicked, this, [this]() {
@@ -1504,9 +1557,14 @@ private:
 	void RefreshButtons()
 	{
 		const bool hasScene = sceneList->currentItem() != nullptr;
+		QString removeReason;
+		const bool canRemove =
+			hasScene && workspace && workspace->CanvasManager() &&
+			workspace->CanvasManager()->CanRemoveVerticalScene(SelectedSceneId(), &removeReason);
 		duplicateButton->setEnabled(hasScene);
 		renameButton->setEnabled(hasScene);
-		removeButton->setEnabled(hasScene);
+		removeButton->setEnabled(canRemove);
+		removeButton->setToolTip(canRemove ? QString() : removeReason);
 		linkButton->setEnabled(hasScene);
 		openProjectorButton->setEnabled(hasScene);
 		clearLinkButton->setEnabled(linkList->currentItem() != nullptr);
@@ -2793,6 +2851,8 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 
 	verticalCanvasNameEdit = new QLineEdit(verticalModePage);
 	verticalPresetCombo = new QComboBox(verticalModePage);
+	verticalFeedCombo = new QComboBox(verticalModePage);
+	verticalFeedStatusLabel = new QLabel(verticalModePage);
 	verticalLinkedSyncCheckBox = new QCheckBox(QStringLiteral("Sync linked scenes from the current program scene"), verticalModePage);
 	verticalTransitionCombo = new QComboBox(verticalModePage);
 	verticalTransitionDurationSpin = new QSpinBox(verticalModePage);
@@ -2835,8 +2895,10 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	verticalCanvasPreview->SetCanvasId(canvasManager->VerticalCanvasId());
 	verticalCanvasStatusLabel->setObjectName(QStringLiteral("switcherVerticalPreviewStatus"));
 	verticalOutputStatusLabel->setObjectName(QStringLiteral("switcherVerticalPreviewStatus"));
+	verticalFeedStatusLabel->setObjectName(QStringLiteral("switcherVerticalPreviewStatus"));
 	verticalCanvasStatusLabel->setWordWrap(true);
 	verticalOutputStatusLabel->setWordWrap(true);
+	verticalFeedStatusLabel->setWordWrap(true);
 	verticalSceneList->setAlternatingRowColors(true);
 	verticalSceneList->setObjectName(QStringLiteral("switcherVerticalSceneList"));
 	verticalSceneList->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -2856,7 +2918,7 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	verticalPresetCombo->addItem(QStringLiteral("9:16 (720x1280)"), QSize(720, 1280));
 	verticalPresetCombo->addItem(QStringLiteral("1:1 (1080x1080)"), QSize(1080, 1080));
 	verticalPresetCombo->addItem(QStringLiteral("16:9 (1920x1080)"), QSize(1920, 1080));
-	SetMinimumControlHeight({verticalCanvasNameEdit, verticalPresetCombo, verticalTransitionCombo,
+	SetMinimumControlHeight({verticalCanvasNameEdit, verticalPresetCombo, verticalFeedCombo, verticalTransitionCombo,
 				 verticalTransitionDurationSpin, verticalSceneOverrideCombo,
 				 verticalSceneOverrideDurationSpin, verticalSceneAddButton, verticalSceneRemoveButton,
 				 verticalSceneMenuButton, verticalSourcePropertiesButton, verticalSourceFiltersButton,
@@ -2918,10 +2980,9 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	verticalWindowGrid->addWidget(verticalSceneDockButton, 0, 0);
 	verticalWindowGrid->addWidget(verticalSceneOpenWindowButton, 0, 1);
 	verticalWindowGrid->addWidget(verticalSceneOpenProjectorButton, 0, 2);
-	verticalWindowGrid->addWidget(verticalScenesDockButton, 1, 0);
-	verticalWindowGrid->addWidget(verticalSourcesDockButton, 1, 1);
-	verticalWindowGrid->addWidget(verticalTransitionsDockButton, 1, 2);
-	verticalWindowGrid->addWidget(verticalSettingsDockButton, 2, 0, 1, 3);
+	for (auto *button :
+	     {verticalScenesDockButton, verticalSourcesDockButton, verticalTransitionsDockButton, verticalSettingsDockButton})
+		button->setVisible(false);
 	previewCardLayout->addLayout(verticalWindowGrid);
 
 	auto [outputCard, outputCardLayout] = makeVerticalPanel(verticalPreviewColumn, QString());
@@ -2950,8 +3011,17 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	auto *verticalRailLayout = new QVBoxLayout(verticalRail);
 	verticalRailLayout->setContentsMargins(0, 0, 0, 0);
 	verticalRailLayout->setSpacing(12);
-	verticalRailLayout->addWidget(outputCard, 0);
 	verticalSurfaceTabs->setObjectName(QStringLiteral("switcherVerticalSurfaceTabs"));
+
+	auto [feedCard, feedCardLayout] = makeVerticalPanel(verticalRail, QStringLiteral("Vertical Feed"));
+	auto *feedForm = new QFormLayout;
+	ConfigureFormLayout(feedForm);
+	feedForm->addRow(QStringLiteral("Input"), verticalFeedCombo);
+	feedForm->addRow(QStringLiteral("Format"), verticalPresetCombo);
+	feedCardLayout->addLayout(feedForm);
+	feedCardLayout->addWidget(verticalFeedStatusLabel);
+	verticalRailLayout->addWidget(feedCard, 0);
+	verticalRailLayout->addWidget(outputCard, 0);
 
 	auto *scenesTab = new QWidget(verticalSurfaceTabs);
 	auto *scenesTabLayout = new QVBoxLayout(scenesTab);
@@ -3045,7 +3115,8 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 			     verticalApplySceneTransitionButton, verticalClearSceneTransitionButton})
 		button->setMinimumHeight(34);
 
-	verticalRailLayout->addWidget(verticalSurfaceTabs, 1);
+	verticalSurfaceTabs->setVisible(false);
+	verticalRailLayout->addStretch(1);
 
 	verticalLayout->addWidget(verticalPreviewColumn, 0);
 	verticalLayout->addWidget(verticalRail, 1);
@@ -3865,6 +3936,8 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 		&SwitcherWorkspaceDock::RemoteStateUpdated);
 	connect(verticalCanvasNameEdit, &QLineEdit::textEdited, this, &SwitcherWorkspaceDock::VerticalCanvasNameChanged);
 	connect(verticalPresetCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, &SwitcherWorkspaceDock::VerticalPresetChanged);
+	connect(verticalFeedCombo, qOverload<int>(&QComboBox::currentIndexChanged), this,
+		&SwitcherWorkspaceDock::VerticalFeedChanged);
 	connect(verticalTransitionCombo, qOverload<int>(&QComboBox::currentIndexChanged), this,
 		&SwitcherWorkspaceDock::VerticalTransitionChanged);
 	connect(verticalTransitionDurationSpin, qOverload<int>(&QSpinBox::valueChanged), this,
@@ -4923,6 +4996,9 @@ obs_data_t *SwitcherWorkspaceDock::SaveState()
 	obs_data_set_int(data, "mode_index", currentModeIndex);
 	obs_data_set_int(data, "quick_multiview_monitor", quickMultiviewMonitor);
 	obs_data_set_int(data, "quick_program_monitor", quickProgramMonitor);
+	obs_data_set_string(data, "vertical_feed_mode", verticalFeedMode.toUtf8().constData());
+	obs_data_set_string(data, "vertical_feed_source_uuid", verticalFeedSourceUuid.toUtf8().constData());
+	obs_data_set_string(data, "vertical_feed_source_name", verticalFeedSourceName.toUtf8().constData());
 	if (workspacePlacementInitialized)
 		obs_data_set_string(data, "geometry", saveGeometry().toBase64().constData());
 
@@ -4975,12 +5051,23 @@ void SwitcherWorkspaceDock::LoadState(obs_data_t *data)
 						? ClampedMonitorIndex(
 							  static_cast<int>(obs_data_get_int(data, "quick_program_monitor")))
 						: -2;
+		verticalFeedMode = obs_data_has_user_value(data, "vertical_feed_mode")
+					   ? QString::fromUtf8(obs_data_get_string(data, "vertical_feed_mode"))
+					   : QString::fromLatin1(kVerticalFeedProgram);
+		verticalFeedSourceUuid = QString::fromUtf8(obs_data_get_string(data, "vertical_feed_source_uuid"));
+		verticalFeedSourceName = QString::fromUtf8(obs_data_get_string(data, "vertical_feed_source_name"));
 	} else {
 		HideSettingsPanel();
 		modeIndex = 0;
 		quickMultiviewMonitor = -2;
 		quickProgramMonitor = -2;
+		verticalFeedMode = QString::fromLatin1(kVerticalFeedProgram);
+		verticalFeedSourceUuid.clear();
+		verticalFeedSourceName.clear();
 	}
+	if (verticalFeedMode != QString::fromLatin1(kVerticalFeedScene) &&
+	    verticalFeedMode != QString::fromLatin1(kVerticalFeedSource))
+		verticalFeedMode = QString::fromLatin1(kVerticalFeedProgram);
 
 	obs_data_t *remoteData = data ? obs_data_get_obj(data, kRemoteStateKey) : nullptr;
 	SwitcherRemoteManager::Instance()->LoadState(remoteData);
@@ -5054,6 +5141,17 @@ void SwitcherWorkspaceDock::HandleSourceRemoved(obs_source_t *source)
 	for (const auto &slot : slotWidgets)
 		slot->ClearIfMatches(source);
 
+	const QString removedUuid = QString::fromUtf8(obs_source_get_uuid(source));
+	const QString removedName = QString::fromUtf8(obs_source_get_name(source));
+	if ((verticalFeedMode == QString::fromLatin1(kVerticalFeedScene) ||
+	     verticalFeedMode == QString::fromLatin1(kVerticalFeedSource)) &&
+	    ((!verticalFeedSourceUuid.isEmpty() && verticalFeedSourceUuid == removedUuid) || verticalFeedSourceName == removedName)) {
+		verticalFeedMode = QString::fromLatin1(kVerticalFeedProgram);
+		verticalFeedSourceUuid.clear();
+		verticalFeedSourceName.clear();
+		ApplyVerticalFeedSelection(false);
+	}
+
 	RefreshSlotList();
 	RefreshSceneOptions();
 	RefreshSelectedSlotEditor();
@@ -5087,11 +5185,15 @@ void SwitcherWorkspaceDock::HandleFrontendEvent(enum obs_frontend_event event)
 		EnsureVerticalSourcesObsDock(false);
 		EnsureVerticalTransitionsObsDock(false);
 		EnsureVerticalSettingsObsDock(false);
+		ApplyVerticalFeedSelection(false);
 		ScheduleVerticalRefresh();
 		RefreshMotionPage();
 		RefreshAutomationPage();
 		break;
 	case OBS_FRONTEND_EVENT_SCENE_CHANGED:
+		if (verticalFeedMode == QString::fromLatin1(kVerticalFeedProgram))
+			ApplyVerticalFeedSelection(false);
+		[[fallthrough]];
 	case OBS_FRONTEND_EVENT_PREVIEW_SCENE_CHANGED:
 	case OBS_FRONTEND_EVENT_SCENE_LIST_CHANGED:
 	case OBS_FRONTEND_EVENT_STUDIO_MODE_DISABLED:
@@ -7977,7 +8079,33 @@ void SwitcherWorkspaceDock::VerticalPresetChanged(int)
 
 	const QSize size = verticalPresetCombo->currentData().toSize();
 	canvasManager->SetVerticalPreset(size, verticalPresetCombo->currentText());
+	ApplyVerticalFeedSelection(false);
+	QPointer<SwitcherWorkspaceDock> self(this);
+	QTimer::singleShot(325, this, [self]() {
+		if (self)
+			self->ApplyVerticalFeedSelection(false);
+	});
 	UpdateVerticalPreviewAspect();
+}
+
+void SwitcherWorkspaceDock::VerticalFeedChanged(int index)
+{
+	if (loadingVerticalUi || !verticalFeedCombo)
+		return;
+
+	verticalFeedMode = verticalFeedCombo->itemData(index, kVerticalFeedModeRole).toString();
+	if (verticalFeedMode.isEmpty())
+		verticalFeedMode = QString::fromLatin1(kVerticalFeedProgram);
+	verticalFeedSourceUuid = verticalFeedCombo->itemData(index, kVerticalFeedUuidRole).toString();
+	verticalFeedSourceName = verticalFeedCombo->itemData(index, kVerticalFeedNameRole).toString();
+
+	if (ApplyVerticalFeedSelection(true)) {
+		emit WorkspaceStateChanged();
+		return;
+	}
+
+	if (verticalFeedStatusLabel)
+		verticalFeedStatusLabel->setText(QStringLiteral("That vertical input is not available. Program remains the default."));
 }
 
 void SwitcherWorkspaceDock::VerticalSceneSelectionChanged()
@@ -8026,6 +8154,13 @@ void SwitcherWorkspaceDock::RemoveSelectedVerticalScene()
 {
 	if (!canvasManager || !verticalSceneList->currentItem())
 		return;
+
+	QString reason;
+	if (!CanRemoveSelectedVerticalScene(&reason)) {
+		if (verticalCanvasStatusLabel && !reason.isEmpty())
+			verticalCanvasStatusLabel->setText(reason);
+		return;
+	}
 
 	DeleteCanvasScene(canvasManager->VerticalCanvasId(), verticalSceneList->currentItem()->data(Qt::UserRole + 1).toString());
 }
@@ -8154,7 +8289,7 @@ void SwitcherWorkspaceDock::AppendVerticalSceneItem(const QString &sceneName, bo
 			QSignalBlocker blocker(verticalSceneList);
 			verticalSceneList->setCurrentItem(existingItem);
 		}
-		verticalSceneRemoveButton->setEnabled(verticalSceneList->currentItem() != nullptr);
+		verticalSceneRemoveButton->setEnabled(CanRemoveSelectedVerticalScene());
 		verticalSceneMenuButton->setEnabled(verticalSceneList->currentItem() != nullptr);
 		verticalLinkCurrentSceneButton->setEnabled(verticalSceneList->currentItem() != nullptr);
 		verticalSceneOverrideCombo->setEnabled(verticalSceneList->currentItem() != nullptr);
@@ -8171,7 +8306,7 @@ void SwitcherWorkspaceDock::AppendVerticalSceneItem(const QString &sceneName, bo
 	if (selectItem)
 		verticalSceneList->setCurrentItem(item);
 
-	verticalSceneRemoveButton->setEnabled(verticalSceneList->currentItem() != nullptr);
+	verticalSceneRemoveButton->setEnabled(CanRemoveSelectedVerticalScene());
 	verticalSceneMenuButton->setEnabled(verticalSceneList->currentItem() != nullptr);
 	verticalLinkCurrentSceneButton->setEnabled(verticalSceneList->currentItem() != nullptr);
 	verticalSceneOverrideCombo->setEnabled(verticalSceneList->currentItem() != nullptr);
@@ -8203,8 +8338,14 @@ void SwitcherWorkspaceDock::ApplyVerticalSceneSelectionUi(const QString &sceneNa
 	}
 
 	verticalCanvasStatusLabel->setText(
-		QStringLiteral("Native canvas active at %1.\nCurrent vertical scene: %2.")
+		QStringLiteral("Vertical preview at %1.\nInternal scene: %2.")
 			.arg(aspectLabel, sceneName.isEmpty() ? QStringLiteral("No vertical scene selected") : sceneName));
+	if (verticalSceneRemoveButton) {
+		QString reason;
+		const bool canRemove = CanRemoveSelectedVerticalScene(&reason);
+		verticalSceneRemoveButton->setEnabled(canRemove);
+		verticalSceneRemoveButton->setToolTip(canRemove ? QString() : reason);
+	}
 }
 
 QString SwitcherWorkspaceDock::SelectedVerticalSceneId() const
@@ -8217,6 +8358,212 @@ QString SwitcherWorkspaceDock::SelectedVerticalSceneName() const
 {
 	auto *item = verticalSceneList ? verticalSceneList->currentItem() : nullptr;
 	return item ? item->data(Qt::UserRole + 1).toString() : QString();
+}
+
+void SwitcherWorkspaceDock::RefreshVerticalFeedOptions()
+{
+	if (!verticalFeedCombo)
+		return;
+
+	const QString selectedMode = verticalFeedMode.isEmpty() ? QString::fromLatin1(kVerticalFeedProgram) : verticalFeedMode;
+	const QString selectedUuid = verticalFeedSourceUuid;
+	const QString selectedName = verticalFeedSourceName;
+
+	QSignalBlocker blocker(verticalFeedCombo);
+	verticalFeedCombo->clear();
+
+	QString programLabel = QStringLiteral("Program (default)");
+	if (OBSSourceAutoRelease currentScene = obs_frontend_get_current_scene()) {
+		const QString currentName = QString::fromUtf8(obs_source_get_name(currentScene));
+		if (!currentName.isEmpty())
+			programLabel = QStringLiteral("Program: %1").arg(currentName);
+	}
+	verticalFeedCombo->addItem(programLabel);
+	verticalFeedCombo->setItemData(0, QString::fromLatin1(kVerticalFeedProgram), kVerticalFeedModeRole);
+
+	int selectedIndex = selectedMode == QString::fromLatin1(kVerticalFeedProgram) ? 0 : -1;
+	struct obs_frontend_source_list scenes = {};
+	obs_frontend_get_scenes(&scenes);
+	for (size_t index = 0; index < scenes.sources.num; index++) {
+		obs_source_t *source = scenes.sources.array[index];
+		if (!source)
+			continue;
+		const QString uuid = QString::fromUtf8(obs_source_get_uuid(source));
+		const QString name = QString::fromUtf8(obs_source_get_name(source));
+		if (name.isEmpty())
+			continue;
+		verticalFeedCombo->addItem(QStringLiteral("Scene: %1").arg(name));
+		const int row = verticalFeedCombo->count() - 1;
+		verticalFeedCombo->setItemData(row, QString::fromLatin1(kVerticalFeedScene), kVerticalFeedModeRole);
+		verticalFeedCombo->setItemData(row, uuid, kVerticalFeedUuidRole);
+		verticalFeedCombo->setItemData(row, name, kVerticalFeedNameRole);
+		if (selectedMode == QString::fromLatin1(kVerticalFeedScene) &&
+		    ((!selectedUuid.isEmpty() && selectedUuid == uuid) || selectedName == name))
+			selectedIndex = row;
+	}
+	obs_frontend_source_list_free(&scenes);
+
+	QVector<VerticalFeedSourceOption> sourceOptions;
+	obs_enum_sources(CollectVerticalFeedSourceOption, &sourceOptions);
+	std::sort(sourceOptions.begin(), sourceOptions.end(),
+		  [](const VerticalFeedSourceOption &left, const VerticalFeedSourceOption &right) {
+			  return left.name.localeAwareCompare(right.name) < 0;
+		  });
+	for (const auto &source : sourceOptions) {
+		verticalFeedCombo->addItem(QStringLiteral("Source: %1").arg(source.name));
+		const int row = verticalFeedCombo->count() - 1;
+		verticalFeedCombo->setItemData(row, QString::fromLatin1(kVerticalFeedSource), kVerticalFeedModeRole);
+		verticalFeedCombo->setItemData(row, source.uuid, kVerticalFeedUuidRole);
+		verticalFeedCombo->setItemData(row, source.name, kVerticalFeedNameRole);
+		if (selectedMode == QString::fromLatin1(kVerticalFeedSource) &&
+		    ((!selectedUuid.isEmpty() && selectedUuid == source.uuid) || selectedName == source.name))
+			selectedIndex = row;
+	}
+
+	if (selectedIndex < 0) {
+		verticalFeedMode = QString::fromLatin1(kVerticalFeedProgram);
+		verticalFeedSourceUuid.clear();
+		verticalFeedSourceName.clear();
+		selectedIndex = 0;
+	}
+	verticalFeedCombo->setCurrentIndex(selectedIndex);
+}
+
+bool SwitcherWorkspaceDock::ReplaceVerticalSceneFeedSource(obs_source_t *source, const QString &statusLabel)
+{
+	if (!canvasManager || !source || !FrontendApisAvailable())
+		return false;
+
+	if (!canvasManager->EnsureVerticalCanvas())
+		return false;
+
+	const QString canvasId = canvasManager->VerticalCanvasId();
+	auto scenes = canvasManager->ScenesForCanvas(canvasId);
+	if (scenes.isEmpty()) {
+		QString createdName;
+		if (!canvasManager->CreateVerticalScene(QStringLiteral("Vertical Scene"), &createdName) || createdName.isEmpty())
+			return false;
+		scenes = canvasManager->ScenesForCanvas(canvasId);
+	}
+	if (scenes.isEmpty())
+		return false;
+
+	const auto descriptor = canvasManager->CanvasDescriptor(canvasId);
+	QString targetSceneIdOrName;
+	for (const auto &scene : scenes) {
+		if ((!descriptor.activeSceneUuid.isEmpty() && scene.uuid == descriptor.activeSceneUuid) ||
+		    scene.name == descriptor.activeSceneName) {
+			targetSceneIdOrName = !scene.uuid.isEmpty() ? scene.uuid : scene.name;
+			break;
+		}
+	}
+	if (targetSceneIdOrName.isEmpty())
+		targetSceneIdOrName = !scenes.front().uuid.isEmpty() ? scenes.front().uuid : scenes.front().name;
+
+	OBSSourceAutoRelease sceneSource = canvasManager->CanvasSceneSource(canvasId, targetSceneIdOrName);
+	if (!sceneSource) {
+		if (!canvasManager->SetCanvasActiveScene(canvasId, targetSceneIdOrName))
+			return false;
+		sceneSource = canvasManager->CanvasSceneSource(canvasId, targetSceneIdOrName);
+	}
+	if (!sceneSource || sceneSource.Get() == source)
+		return false;
+
+	obs_scene_t *scene = obs_scene_from_source(sceneSource);
+	if (!scene)
+		return false;
+
+	SceneItemRemovalCollector removal;
+	obs_scene_enum_items(scene, CollectSceneItemsForRemoval, &removal);
+
+	obs_sceneitem_t *item = obs_scene_add(scene, source);
+	if (!item) {
+		for (auto *oldItem : removal.items)
+			obs_sceneitem_release(oldItem);
+		return false;
+	}
+
+	const QSize canvasSize = canvasManager->CanvasSize(canvasId);
+	obs_transform_info info = {};
+	info.pos.x = 0.0f;
+	info.pos.y = 0.0f;
+	info.rot = 0.0f;
+	info.scale.x = 1.0f;
+	info.scale.y = 1.0f;
+	info.alignment = OBS_ALIGN_LEFT | OBS_ALIGN_TOP;
+	info.bounds_type = OBS_BOUNDS_SCALE_OUTER;
+	info.bounds_alignment = OBS_ALIGN_CENTER;
+	info.bounds.x = float(std::max(2, canvasSize.width()));
+	info.bounds.y = float(std::max(2, canvasSize.height()));
+	info.crop_to_bounds = true;
+	obs_sceneitem_set_info2(item, &info);
+	obs_sceneitem_set_visible(item, true);
+	obs_sceneitem_set_locked(item, false);
+
+	for (auto *oldItem : removal.items) {
+		obs_sceneitem_remove(oldItem);
+		obs_sceneitem_release(oldItem);
+	}
+
+	if (!canvasManager->SetCanvasActiveScene(canvasId, targetSceneIdOrName))
+		return false;
+
+	if (verticalFeedStatusLabel)
+		verticalFeedStatusLabel->setText(statusLabel);
+	ScheduleVerticalRefresh();
+	return true;
+}
+
+bool SwitcherWorkspaceDock::ApplyVerticalFeedSelection(bool refreshUi)
+{
+	if (!canvasManager || !FrontendApisAvailable())
+		return false;
+
+	if (refreshUi)
+		RefreshVerticalFeedOptions();
+
+	const QString mode = verticalFeedMode.isEmpty() ? QString::fromLatin1(kVerticalFeedProgram) : verticalFeedMode;
+	OBSSourceAutoRelease source = nullptr;
+	QString status;
+
+	if (mode == QString::fromLatin1(kVerticalFeedScene)) {
+		if (!verticalFeedSourceUuid.isEmpty())
+			source = obs_get_source_by_uuid(verticalFeedSourceUuid.toUtf8().constData());
+		if (!source && !verticalFeedSourceName.isEmpty())
+			source = obs_get_source_by_name(verticalFeedSourceName.toUtf8().constData());
+		status = QStringLiteral("Vertical is using scene: %1")
+				 .arg(verticalFeedSourceName.isEmpty() ? QStringLiteral("Selected scene") : verticalFeedSourceName);
+	} else if (mode == QString::fromLatin1(kVerticalFeedSource)) {
+		if (!verticalFeedSourceUuid.isEmpty())
+			source = obs_get_source_by_uuid(verticalFeedSourceUuid.toUtf8().constData());
+		if (!source && !verticalFeedSourceName.isEmpty())
+			source = obs_get_source_by_name(verticalFeedSourceName.toUtf8().constData());
+		status = QStringLiteral("Vertical is using source: %1")
+				 .arg(verticalFeedSourceName.isEmpty() ? QStringLiteral("Selected source") : verticalFeedSourceName);
+	} else {
+		source = obs_frontend_get_current_scene();
+		const QString programName = source ? QString::fromUtf8(obs_source_get_name(source)) : QString();
+		status = QStringLiteral("Vertical follows Program by default%1.")
+				 .arg(programName.isEmpty() ? QString() : QStringLiteral(": %1").arg(programName));
+	}
+
+	if (!source)
+		return false;
+
+	return ReplaceVerticalSceneFeedSource(source, status);
+}
+
+bool SwitcherWorkspaceDock::CanRemoveSelectedVerticalScene(QString *reason) const
+{
+	if (!canvasManager || !verticalSceneList || !verticalSceneList->currentItem()) {
+		if (reason)
+			*reason = QStringLiteral("No vertical scene is selected.");
+		return false;
+	}
+
+	const QString sceneId = SelectedVerticalSceneId();
+	const QString sceneName = SelectedVerticalSceneName();
+	return canvasManager->CanRemoveVerticalScene(!sceneId.isEmpty() ? sceneId : sceneName, reason);
 }
 
 int SwitcherWorkspaceDock::SelectedVerticalSourceItemId() const
@@ -8442,7 +8789,11 @@ void SwitcherWorkspaceDock::ShowVerticalSceneContextMenu(const QPoint &pos)
 		if (accepted && !newName.trimmed().isEmpty())
 			canvasManager->RenameVerticalScene(sceneId, newName.trimmed());
 	});
-	menu.addAction(QStringLiteral("Remove"), this, &SwitcherWorkspaceDock::RemoveSelectedVerticalScene);
+	QString removeReason;
+	auto *removeAction = menu.addAction(QStringLiteral("Remove"), this, &SwitcherWorkspaceDock::RemoveSelectedVerticalScene);
+	const bool canRemove = CanRemoveSelectedVerticalScene(&removeReason);
+	removeAction->setEnabled(canRemove);
+	removeAction->setStatusTip(removeReason);
 	menu.addSeparator();
 	menu.addAction(QStringLiteral("Open Projector"), this, [this, sceneId] {
 		canvasManager->SetCanvasActiveScene(canvasManager->VerticalCanvasId(), sceneId);
@@ -9032,6 +9383,7 @@ void SwitcherWorkspaceDock::RefreshVerticalPage()
 
 	QSignalBlocker nameBlocker(verticalCanvasNameEdit);
 	QSignalBlocker presetBlocker(verticalPresetCombo);
+	QSignalBlocker feedBlocker(verticalFeedCombo);
 	QSignalBlocker linkedBlocker(verticalLinkedSyncCheckBox);
 	QSignalBlocker transitionBlocker(verticalTransitionCombo);
 	QSignalBlocker transitionDurationBlocker(verticalTransitionDurationSpin);
@@ -9043,6 +9395,7 @@ void SwitcherWorkspaceDock::RefreshVerticalPage()
 
 	const auto descriptor = canvasManager->CanvasDescriptor(canvasManager->VerticalCanvasId());
 	UpdateVerticalPreviewAspect();
+	RefreshVerticalFeedOptions();
 	verticalCanvasNameEdit->setText(descriptor.name);
 	const int presetIndex = verticalPresetCombo->findData(descriptor.size);
 	if (presetIndex >= 0)
@@ -9111,10 +9464,15 @@ void SwitcherWorkspaceDock::RefreshVerticalPage()
 	const QString activeSceneName = descriptor.activeSceneName.isEmpty() ? QStringLiteral("No vertical scene selected")
 								    : descriptor.activeSceneName;
 	verticalCanvasStatusLabel->setText(
-		QStringLiteral("Native canvas active at %1.\nCurrent vertical scene: %2.")
+		QStringLiteral("Vertical preview at %1.\nInternal scene: %2.")
 			.arg(descriptor.aspectPreset.isEmpty() ? QStringLiteral("%1x%2").arg(descriptor.size.width()).arg(descriptor.size.height())
 							       : descriptor.aspectPreset,
 			     activeSceneName));
+	if (verticalFeedStatusLabel && verticalFeedStatusLabel->text().trimmed().isEmpty()) {
+		verticalFeedStatusLabel->setText(verticalFeedMode == QString::fromLatin1(kVerticalFeedProgram)
+							 ? QStringLiteral("Vertical follows Program by default.")
+							 : QStringLiteral("Choose the scene or source to feed the vertical canvas."));
+	}
 	verticalOutputStatusLabel->setText(
 		QStringLiteral("OBS Output Shortcuts - Main OBS: %1").arg(statuses.join(QStringLiteral(" | "))));
 	PopulateVerticalSourceTree(verticalSourceTree, sources);
@@ -9158,7 +9516,10 @@ void SwitcherWorkspaceDock::RefreshVerticalPage()
 	verticalChapterButton->setEnabled(frontendReady && obs_frontend_recording_active() &&
 					  !obs_frontend_recording_paused());
 	verticalReplaySaveButton->setEnabled(frontendReady && obs_frontend_replay_buffer_active());
-	verticalSceneRemoveButton->setEnabled(verticalSceneList->currentItem() != nullptr);
+	QString removeReason;
+	const bool canRemoveScene = CanRemoveSelectedVerticalScene(&removeReason);
+	verticalSceneRemoveButton->setEnabled(canRemoveScene);
+	verticalSceneRemoveButton->setToolTip(canRemoveScene ? QString() : removeReason);
 	verticalSceneMenuButton->setEnabled(verticalSceneList->currentItem() != nullptr);
 	verticalSceneOpenProjectorButton->setEnabled(!descriptor.activeSceneName.isEmpty());
 	verticalLinkCurrentSceneButton->setEnabled(verticalSceneList->currentItem() != nullptr);

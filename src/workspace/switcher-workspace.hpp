@@ -241,6 +241,7 @@ private slots:
 	void ModeChanged(int index);
 	void VerticalCanvasNameChanged(const QString &name);
 	void VerticalPresetChanged(int index);
+	void VerticalFeedChanged(int index);
 	void VerticalSceneSelectionChanged();
 	void AddVerticalScene();
 	void RemoveSelectedVerticalScene();
@@ -347,6 +348,7 @@ private:
 	void HideSettingsPanel();
 	void ScheduleVerticalRefresh();
 	void RefreshVerticalPage();
+	void RefreshVerticalFeedOptions();
 	void RefreshVerticalObsDock();
 	void RefreshVerticalDockSurfaces();
 	void RefreshVerticalSettingsSummary();
@@ -364,6 +366,9 @@ private:
 	void UnregisterVerticalObsDocks();
 	void AppendVerticalSceneItem(const QString &sceneName, bool selectItem = false);
 	void ApplyVerticalSceneSelectionUi(const QString &sceneName);
+	bool ApplyVerticalFeedSelection(bool refreshUi = true);
+	bool ReplaceVerticalSceneFeedSource(obs_source_t *source, const QString &statusLabel);
+	bool CanRemoveSelectedVerticalScene(QString *reason = nullptr) const;
 	void ShowVerticalSceneContextMenu(const QPoint &pos);
 	void ShowVerticalSourceContextMenu(const QPoint &pos);
 	QString SelectedVerticalSceneId() const;
@@ -467,6 +472,8 @@ private:
 	SwitchMotionManager *motionManager;
 	QLineEdit *verticalCanvasNameEdit;
 	QComboBox *verticalPresetCombo;
+	QComboBox *verticalFeedCombo;
+	QLabel *verticalFeedStatusLabel;
 	QWidget *verticalCanvasPreviewFrame = nullptr;
 	QCheckBox *verticalLinkedSyncCheckBox;
 	QComboBox *verticalTransitionCombo;
@@ -677,6 +684,9 @@ private:
 	bool loadingVerticalUi = false;
 	bool verticalRefreshPending = false;
 	bool suppressNextVerticalRefresh = false;
+	QString verticalFeedMode = QStringLiteral("program");
+	QString verticalFeedSourceUuid;
+	QString verticalFeedSourceName;
 	bool loadingAutomationUi = false;
 	bool loadingMotionUi = false;
 	bool frontendFinishedLoading = false;
