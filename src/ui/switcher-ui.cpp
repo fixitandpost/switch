@@ -49,6 +49,15 @@ void DrawSwitchModeGlyph(QPainter *painter, const QRect &rect, const QString &gl
 		painter->setBrush(Qt::NoBrush);
 		return;
 	}
+	if (glyph == QStringLiteral("remote")) {
+		const QRectF phone = r.adjusted(5.0, 0.0, -5.0, 0.0);
+		painter->drawRoundedRect(phone, 3.0, 3.0);
+		painter->drawLine(QPointF(phone.center().x() - 2.0, phone.bottom() - 3.0),
+				  QPointF(phone.center().x() + 2.0, phone.bottom() - 3.0));
+		painter->drawArc(r.adjusted(1.0, 1.0, -1.0, -1.0), 42 * 16, 96 * 16);
+		painter->drawArc(r.adjusted(5.0, 5.0, -5.0, -5.0), 42 * 16, 96 * 16);
+		return;
+	}
 
 	painter->drawLine(QPointF(r.center().x(), r.top()), QPointF(r.center().x(), r.bottom()));
 	painter->drawLine(QPointF(r.left(), r.center().y()), QPointF(r.right(), r.center().y()));

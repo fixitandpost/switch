@@ -145,6 +145,54 @@ QString CssColor(const QColor &color)
 		.arg(color.alpha());
 }
 
+QColor ContrastTextFor(const QColor &background)
+{
+	const double luminance = background.redF() * 0.2126 + background.greenF() * 0.7152 + background.blueF() * 0.0722;
+	return luminance > 0.58 ? QColor(22, 24, 27) : QColor(255, 255, 255);
+}
+
+QString QuickOutputActiveStyle(const QString &objectName, const QPalette &palette, bool multiview)
+{
+	const QColor surface = palette.color(QPalette::Button);
+	const QColor accent = multiview ? QColor(34, 132, 214) : QColor(35, 158, 92);
+	const QColor fill = Blend(accent, surface, 0.12);
+	const QColor hover = Blend(accent, surface, 0.05);
+	const QColor pressed = Blend(accent.darker(118), surface, 0.06);
+	const QColor border = WithAlpha(accent.lighter(128), 245);
+	const QColor text = ContrastTextFor(fill);
+
+	return QStringLiteral(
+		       "QPushButton#%1 {"
+		       "  background-color: %2;"
+		       "  color: %3;"
+		       "  border: 1px solid %4;"
+		       "  font-weight: 700;"
+		       "}"
+		       "QPushButton#%1:hover {"
+		       "  background-color: %5;"
+		       "  border-color: %4;"
+		       "}"
+		       "QPushButton#%1:pressed {"
+		       "  background-color: %6;"
+		       "  border-color: %4;"
+		       "}")
+		.arg(objectName, CssColor(fill), CssColor(text), CssColor(border), CssColor(hover), CssColor(pressed));
+}
+
+void ApplyQuickOutputActiveStyle(QPushButton *button, bool active, bool multiview)
+{
+	if (!button)
+		return;
+
+	button->setProperty("switchQuickOutputActive", active);
+	if (!active) {
+		button->setStyleSheet(QString());
+		return;
+	}
+
+	button->setStyleSheet(QuickOutputActiveStyle(button->objectName(), button->palette(), multiview));
+}
+
 obs_source_t *ResolveStoredSource(obs_data_t *data)
 {
 	if (!data)
@@ -2248,6 +2296,7 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 		  verticalModePage(new QWidget(modeStack)),
 		  motionModePage(new QWidget(modeStack)),
 		  automationModePage(new QWidget(modeStack)),
+		  remoteModePage(new QWidget(modeStack)),
 		  contentSplitter(new QSplitter(Qt::Horizontal, this)),
 		  scrollArea(new QScrollArea(contentSplitter)),
 		  gridContainer(new QWidget(scrollArea)),
@@ -2262,7 +2311,7 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 		  workspaceSettingsSection(new QWidget(workspacePage)),
 		  slotEditorSection(new QWidget(slotPage)),
 		  slotOutputSection(new QWidget(slotPage)),
-		  remoteSettingsSection(new QWidget(workspacePage)),
+		  remoteSettingsSection(new QWidget(remoteModePage)),
 		  slotList(new QListWidget(workspacePage)),
 		  layoutCombo(new QComboBox(workspacePage)),
 		  sceneCombo(new QComboBox(slotPage)),
@@ -2279,15 +2328,16 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 		  slotReplaySaveButton(new QPushButton(slotOutputSection)),
 		  slotStreamButton(new QPushButton(slotOutputSection)),
 		  slotVirtualCamButton(new QPushButton(slotOutputSection)),
-		  remoteEnabledCheckBox(new QCheckBox(QT_UTF8(obs_module_text("SwitcherRemoteEnable")), workspacePage)),
-		  remoteAutoStartCheckBox(new QCheckBox(QT_UTF8(obs_module_text("SwitcherRemoteAutoStart")), workspacePage)),
-		  remoteResolutionCombo(new QComboBox(workspacePage)),
-		  remoteFpsCombo(new QComboBox(workspacePage)),
-		  remoteUrlEdit(new QLineEdit(workspacePage)),
-		  remoteStatusLabel(new QLabel(workspacePage)),
-		  remoteCopyButton(new QPushButton(QT_UTF8(obs_module_text("SwitcherRemoteCopyUrl")), workspacePage)),
-		  remoteRegenerateButton(new QPushButton(QT_UTF8(obs_module_text("SwitcherRemoteRegenerateToken")), workspacePage)),
-		  remoteRestartButton(new QPushButton(QT_UTF8(obs_module_text("SwitcherRemoteRestart")), workspacePage))
+		  remoteEnabledCheckBox(new QCheckBox(QT_UTF8(obs_module_text("SwitcherRemoteEnable")), remoteModePage)),
+		  remoteAutoStartCheckBox(new QCheckBox(QT_UTF8(obs_module_text("SwitcherRemoteAutoStart")), remoteModePage)),
+		  remoteResolutionCombo(new QComboBox(remoteModePage)),
+		  remoteFpsCombo(new QComboBox(remoteModePage)),
+		  remoteUrlEdit(new QLineEdit(remoteModePage)),
+		  remoteStatusLabel(new QLabel(remoteModePage)),
+		  remoteCopyButton(new QPushButton(QT_UTF8(obs_module_text("SwitcherRemoteCopyUrl")), remoteModePage)),
+		  remoteRegenerateButton(new QPushButton(QT_UTF8(obs_module_text("SwitcherRemoteRegenerateToken")),
+							 remoteModePage)),
+		  remoteRestartButton(new QPushButton(QT_UTF8(obs_module_text("SwitcherRemoteRestart")), remoteModePage))
 {
 	gWorkspaceDock = this;
 	canvasManager = new SwitchCanvasManager(this);
@@ -2295,7 +2345,7 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	automationEngine = new SwitchAutomationEngine(canvasManager, motionManager, this);
 	setObjectName(QStringLiteral("switcherWorkspaceRoot"));
 	setAttribute(Qt::WA_StyledBackground, true);
-	for (auto *page : {workspaceModePage, verticalModePage, motionModePage, automationModePage}) {
+	for (auto *page : {workspaceModePage, verticalModePage, motionModePage, automationModePage, remoteModePage}) {
 		page->setObjectName(QStringLiteral("switcherModePage"));
 		page->setAttribute(Qt::WA_StyledBackground, true);
 	}
@@ -2341,6 +2391,8 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	addModeItem(QStringLiteral("Vertical"), QStringLiteral("vertical"));
 	addModeItem(QStringLiteral("Motion"), QStringLiteral("motion"));
 	addModeItem(QStringLiteral("Automation"), QStringLiteral("automation"));
+	addModeItem(QT_UTF8(obs_module_text("SwitcherRemote")), QStringLiteral("remote"));
+	modeList->setFixedHeight(modeList->count() * 52 + 2 * modeList->frameWidth());
 	modeRailLayout->addWidget(modeList);
 	modeRailLayout->addStretch(1);
 
@@ -2352,6 +2404,7 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	modeStack->addWidget(verticalModePage);
 	modeStack->addWidget(motionModePage);
 	modeStack->addWidget(automationModePage);
+	modeStack->addWidget(remoteModePage);
 
 	auto *workspaceModeLayout = new QVBoxLayout(workspaceModePage);
 	workspaceModeLayout->setContentsMargins(0, 0, 0, 0);
@@ -2542,8 +2595,13 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	remoteSettingsLayout->addWidget(remoteCopyButton);
 	remoteSettingsLayout->addWidget(remoteRegenerateButton);
 	remoteSettingsLayout->addWidget(remoteRestartButton);
-	workspacePageLayout->addWidget(remoteSettingsSection);
 	workspacePageLayout->addStretch(1);
+
+	auto *remoteModeLayout = new QVBoxLayout(remoteModePage);
+	remoteModeLayout->setContentsMargins(18, 18, 18, 18);
+	remoteModeLayout->setSpacing(14);
+	remoteModeLayout->addWidget(remoteSettingsSection);
+	remoteModeLayout->addStretch(1);
 
 	verticalCanvasNameEdit = new QLineEdit(verticalModePage);
 	verticalPresetCombo = new QComboBox(verticalModePage);
@@ -4354,6 +4412,7 @@ void SwitcherWorkspaceDock::RemoveQuickOutputControls()
 	quickMultiviewConfigButton = nullptr;
 	quickProgramButton = nullptr;
 	quickProgramConfigButton = nullptr;
+	quickOutputActive = QuickOutputActive::None;
 	if (quickSwitchButton)
 		delete quickSwitchButton.data();
 	quickSwitchButton = nullptr;
@@ -4365,27 +4424,47 @@ void SwitcherWorkspaceDock::UpdateQuickOutputControls()
 	const int programMonitor = EffectiveQuickOutputMonitor(quickProgramMonitor);
 	const QString multiviewTarget = MonitorLabel(multiviewMonitor);
 	const QString programTarget = MonitorLabel(programMonitor);
+	const bool multiviewActive = quickOutputActive == QuickOutputActive::Multiview;
+	const bool programActive = quickOutputActive == QuickOutputActive::Program;
 
 	if (quickMultiviewButton) {
 		quickMultiviewButton->setText(QStringLiteral("Multi View"));
-		quickMultiviewButton->setToolTip(QStringLiteral("Open OBS Multi View on %1").arg(multiviewTarget));
+		quickMultiviewButton->setToolTip(multiviewActive
+							 ? QStringLiteral("OBS Multi View is displaying on %1").arg(multiviewTarget)
+							 : QStringLiteral("Open OBS Multi View on %1").arg(multiviewTarget));
 	}
 	if (quickMultiviewConfigButton)
-		quickMultiviewConfigButton->setToolTip(QStringLiteral("Choose Multi View output display"));
+		quickMultiviewConfigButton->setToolTip(multiviewActive
+							       ? QStringLiteral("Multi View is displaying on %1")
+									 .arg(multiviewTarget)
+							       : QStringLiteral("Choose Multi View output display"));
 	if (quickProgramButton) {
 		quickProgramButton->setText(QStringLiteral("Program Out"));
-		quickProgramButton->setToolTip(QStringLiteral("Open OBS Program output on %1").arg(programTarget));
+		quickProgramButton->setToolTip(programActive
+						       ? QStringLiteral("OBS Program output is displaying on %1")
+								 .arg(programTarget)
+						       : QStringLiteral("Open OBS Program output on %1").arg(programTarget));
 	}
 	if (quickProgramConfigButton)
-		quickProgramConfigButton->setToolTip(QStringLiteral("Choose Program output display"));
+		quickProgramConfigButton->setToolTip(programActive
+							     ? QStringLiteral("Program output is displaying on %1")
+								       .arg(programTarget)
+							     : QStringLiteral("Choose Program output display"));
 	if (quickSwitchButton)
 		quickSwitchButton->setToolTip(QStringLiteral("Open Switch"));
+
+	ApplyQuickOutputActiveStyle(quickMultiviewButton, multiviewActive, true);
+	ApplyQuickOutputActiveStyle(quickMultiviewConfigButton, multiviewActive, true);
+	ApplyQuickOutputActiveStyle(quickProgramButton, programActive, false);
+	ApplyQuickOutputActiveStyle(quickProgramConfigButton, programActive, false);
 }
 
 void SwitcherWorkspaceDock::OpenQuickOutputProjector(bool multiview)
 {
 	const int monitor = EffectiveQuickOutputMonitor(multiview ? quickMultiviewMonitor : quickProgramMonitor);
 	obs_frontend_open_projector(multiview ? "Multiview" : "StudioProgram", monitor, nullptr, nullptr);
+	quickOutputActive = multiview ? QuickOutputActive::Multiview : QuickOutputActive::Program;
+	UpdateQuickOutputControls();
 }
 
 void SwitcherWorkspaceDock::ShowQuickOutputMonitorMenu(bool multiview)
@@ -4608,7 +4687,7 @@ void SwitcherWorkspaceDock::LoadState(obs_data_t *data)
 		else
 			hide();
 
-		modeIndex = std::clamp(static_cast<int>(obs_data_get_int(data, "mode_index")), 0, 3);
+		modeIndex = std::clamp(static_cast<int>(obs_data_get_int(data, "mode_index")), 0, 4);
 		quickMultiviewMonitor = obs_data_has_user_value(data, "quick_multiview_monitor")
 						  ? ClampedMonitorIndex(static_cast<int>(
 							    obs_data_get_int(data, "quick_multiview_monitor")))
@@ -7506,6 +7585,10 @@ void SwitcherWorkspaceDock::ModeChanged(int index)
 	case 3:
 		modeStack->setCurrentWidget(automationModePage);
 		RefreshAutomationPage();
+		break;
+	case 4:
+		modeStack->setCurrentWidget(remoteModePage);
+		RefreshRemoteControls();
 		break;
 	case 0:
 	default:

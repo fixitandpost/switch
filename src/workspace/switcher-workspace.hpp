@@ -404,12 +404,19 @@ private:
 	void OpenQuickOutputProjector(bool multiview);
 	void ShowQuickOutputMonitorMenu(bool multiview);
 
+	enum class QuickOutputActive {
+		None,
+		Multiview,
+		Program,
+	};
+
 	QListWidget *modeList;
 	QStackedWidget *modeStack;
 	QWidget *workspaceModePage;
 	QWidget *verticalModePage;
 	QWidget *motionModePage;
 	QWidget *automationModePage;
+	QWidget *remoteModePage;
 	QSplitter *contentSplitter;
 	QScrollArea *scrollArea;
 	QWidget *gridContainer;
@@ -513,6 +520,7 @@ private:
 	QPointer<QPushButton> quickSwitchButton;
 	int quickMultiviewMonitor = -2;
 	int quickProgramMonitor = -2;
+	QuickOutputActive quickOutputActive = QuickOutputActive::None;
 	QListWidget *motionProfileList;
 	QPushButton *motionAddButton;
 	QPushButton *motionDeleteButton;
