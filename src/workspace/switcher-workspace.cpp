@@ -3122,15 +3122,16 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	verticalLayout->addWidget(verticalRail, 1);
 
 	motionProfileList = new QListWidget(motionModePage);
-	motionAddButton = new QPushButton(QStringLiteral("Add Profile"), motionModePage);
+	motionAddButton = new QPushButton(QStringLiteral("New Profile"), motionModePage);
 	motionDeleteButton = new QPushButton(QStringLiteral("Delete Profile"), motionModePage);
 	motionShotList = new QListWidget(motionModePage);
-	motionShotAddButton = new QPushButton(QStringLiteral("Add Shot"), motionModePage);
+	motionShotAddButton = new QPushButton(QStringLiteral("Add From Program"), motionModePage);
 	motionShotDeleteButton = new QPushButton(QStringLiteral("Delete"), motionModePage);
 	motionShotDuplicateButton = new QPushButton(QStringLiteral("Duplicate"), motionModePage);
-	motionShotBindButton = new QPushButton(QStringLiteral("Bind Item"), motionModePage);
+	motionShotBindButton = new QPushButton(QStringLiteral("Use Selected Item"), motionModePage);
 	motionWorkstationStatusLabel = new QLabel(motionModePage);
 	motionShotModeHintLabel = new QLabel(motionModePage);
+	motionAdvancedControlsCheckBox = new QCheckBox(QStringLiteral("Show advanced Motion controls"), motionModePage);
 	motionShotNameEdit = new QLineEdit(motionModePage);
 	motionShotEnabledCheckBox = new QCheckBox(QStringLiteral("Enable shot"), motionModePage);
 	motionShotSceneCombo = new QComboBox(motionModePage);
@@ -3213,10 +3214,14 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	motionShotList->setAlternatingRowColors(true);
 	motionBindingList->setAlternatingRowColors(true);
 	motionTrackList->setAlternatingRowColors(true);
+	motionShotAddButton->setToolTip(QStringLiteral("Create a shot from the current Program scene item when available."));
 	motionShotSceneCombo->setToolTip(QStringLiteral("Choose the OBS scene this Motion shot controls."));
-	motionShotItemCombo->setToolTip(QStringLiteral("Choose the exact scene item Motion should move. This is the normal workstation binding."));
+	motionShotItemCombo->setToolTip(QStringLiteral("Choose the exact scene item Motion should auto-frame or move."));
 	motionShotBindButton->setToolTip(QStringLiteral("Bind the selected scene item to this Motion shot."));
 	motionShotPresetCombo->setToolTip(QStringLiteral("Apply an editable two-point camera move."));
+	motionPresetCombo->setToolTip(QStringLiteral("Choose the default feel for AI auto-framing."));
+	motionFramingModeCombo->setToolTip(QStringLiteral("Choose the subject framing used by AI auto-framing."));
+	motionAdvancedControlsCheckBox->setToolTip(QStringLiteral("Reveal profile, model, tracking, and detailed motion tuning controls."));
 	motionShotStartPanXSpin->setToolTip(QStringLiteral("Horizontal position at the start of the loop."));
 	motionShotStartPanYSpin->setToolTip(QStringLiteral("Vertical position at the start of the loop."));
 	motionShotStartZoomSpin->setToolTip(QStringLiteral("Zoom at the start of the loop."));
@@ -3383,7 +3388,7 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	auto *motionShotsLayout = new QVBoxLayout(motionShotsPane);
 	motionShotsLayout->setContentsMargins(12, 12, 12, 12);
 	motionShotsLayout->setSpacing(10);
-	auto *motionShotsTitle = new QLabel(QStringLiteral("Shots"), motionShotsPane);
+	auto *motionShotsTitle = new QLabel(QStringLiteral("Motion Shots"), motionShotsPane);
 	motionShotsTitle->setObjectName(QStringLiteral("switcherWorkspaceSettingsSectionTitle"));
 	motionShotsLayout->addWidget(motionShotsTitle);
 	motionShotsLayout->addWidget(motionShotList, 1);
@@ -3407,7 +3412,7 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	auto *motionEditorLayout = new QVBoxLayout(motionEditorPane);
 	motionEditorLayout->setContentsMargins(12, 12, 12, 12);
 	motionEditorLayout->setSpacing(10);
-	auto *motionEditorTitle = new QLabel(QStringLiteral("Motion Workstation"), motionEditorPane);
+	auto *motionEditorTitle = new QLabel(QStringLiteral("Motion Setup"), motionEditorPane);
 	motionEditorTitle->setObjectName(QStringLiteral("switcherWorkspaceSettingsSectionTitle"));
 	motionEditorLayout->addWidget(motionEditorTitle);
 	motionEditorLayout->addWidget(motionWorkstationStatusLabel);
@@ -3429,11 +3434,11 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	motionPreviewTargetLayout->setContentsMargins(0, 0, 0, 0);
 	motionPreviewTargetLayout->setSpacing(12);
 	auto [motionPreviewSection, motionPreviewSectionLayout] =
-		makeMotionSection(motionPreviewTargetStrip, QStringLiteral("Live Scene Preview"));
+		makeMotionSection(motionPreviewTargetStrip, QStringLiteral("Preview"));
 	motionPreviewSectionLayout->addWidget(motionScenePreview);
 	motionPreviewTargetLayout->addWidget(motionPreviewSection, 3);
 	auto [motionLiveSection, motionLiveSectionLayout] =
-		makeMotionSection(motionPreviewTargetStrip, QStringLiteral("Target"));
+		makeMotionSection(motionPreviewTargetStrip, QStringLiteral("Tracking Target"));
 	motionLiveSection->setMinimumWidth(210);
 	motionLiveSectionLayout->addWidget(motionTargetStatusLabel);
 	auto *motionTargetButtons = new QGridLayout;
@@ -3530,9 +3535,13 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	motionShotForm->addRow(QStringLiteral("Scene"), motionShotSceneCombo);
 	motionShotForm->addRow(QStringLiteral("Scene Item"), motionShotItemCombo);
 	motionShotForm->addRow(QStringLiteral("Mode"), motionShotModeCombo);
-	motionShotForm->addRow(QStringLiteral("Playback"), motionShotPlaybackCombo);
+	motionShotForm->addRow(QStringLiteral("Move Preset"), motionShotPresetCombo);
+	motionShotForm->addRow(QStringLiteral("Auto Frame Style"), motionPresetCombo);
+	motionShotForm->addRow(QStringLiteral("Framing"), motionFramingModeCombo);
 	motionShotSectionLayout->addLayout(motionShotForm);
 	motionShotSectionLayout->addWidget(motionShotEnabledCheckBox);
+	motionShotSectionLayout->addWidget(motionEnabledCheckBox);
+	motionShotSectionLayout->addWidget(motionAdvancedControlsCheckBox);
 	motionControlsLayout->addWidget(motionShotSection);
 
 	auto [motionPositionSectionFrame, motionPositionSectionLayout] =
@@ -3540,7 +3549,7 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	motionPositionSection = motionPositionSectionFrame;
 	auto *motionPositionForm = new QFormLayout;
 	ConfigureFormLayout(motionPositionForm);
-	motionPositionForm->addRow(QStringLiteral("Loop Preset"), motionShotPresetCombo);
+	motionPositionForm->addRow(QStringLiteral("Playback"), motionShotPlaybackCombo);
 	motionPositionForm->addRow(QStringLiteral("Duration"), makeIntSliderRow(motionControlsPane, motionShotDurationSpin, motionShotDurationSlider));
 	motionPositionForm->addRow(QStringLiteral("Easing"), motionShotEasingCombo);
 	motionPositionForm->addRow(QStringLiteral("Loop"), motionShotLoopModeCombo);
@@ -3560,21 +3569,18 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	auto *motionProfileForm = new QFormLayout;
 	ConfigureFormLayout(motionProfileForm);
 	motionProfileForm->addRow(QStringLiteral("Profile"), motionNameEdit);
-	motionProfileForm->addRow(QStringLiteral("Motion Preset"), motionPresetCombo);
 	motionProfileForm->addRow(QStringLiteral("Backend"), motionBackendCombo);
 	motionProfileForm->addRow(QStringLiteral("Model"), motionModelPathEdit);
 	motionProfileSectionLayout->addLayout(motionProfileForm);
 	motionProfileSectionLayout->addWidget(motionRuntimeStatusLabel);
-	motionProfileSectionLayout->addWidget(motionEnabledCheckBox);
 	motionProfileSectionLayout->addWidget(motionDebugOverlayCheckBox);
 
 	auto [motionFramingSectionFrame, motionFramingSectionLayout] =
-		makeMotionSection(motionControlsPane, QStringLiteral("AI Target And Framing"));
+		makeMotionSection(motionControlsPane, QStringLiteral("Auto Frame Tuning"));
 	motionFramingSection = motionFramingSectionFrame;
 	auto *motionFramingForm = new QFormLayout;
 	ConfigureFormLayout(motionFramingForm);
 	motionFramingForm->addRow(QStringLiteral("Subject"), motionSubjectModeCombo);
-	motionFramingForm->addRow(QStringLiteral("Framing"), motionFramingModeCombo);
 	motionFramingForm->addRow(QStringLiteral("Confidence"), makeDoubleSliderRow(motionControlsPane, motionConfidenceSpin, motionConfidenceSlider));
 	motionFramingForm->addRow(QStringLiteral("Max Zoom"), makeDoubleSliderRow(motionControlsPane, motionMaxZoomSpin, motionMaxZoomSlider));
 	motionFramingForm->addRow(QStringLiteral("Framing Margin"), makeDoubleSliderRow(motionControlsPane, motionFramingMarginSpin, motionFramingMarginSlider));
@@ -3584,7 +3590,7 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	motionControlsLayout->addWidget(motionFramingSection);
 
 	auto [motionTrackingSectionFrame, motionTrackingSectionLayout] =
-		makeMotionSection(motionControlsPane, QStringLiteral("Advanced Tracking IDs"));
+		makeMotionSection(motionControlsPane, QStringLiteral("Track ID Tuning"));
 	motionTrackingSection = motionTrackingSectionFrame;
 	auto *motionTrackingForm = new QFormLayout;
 	ConfigureFormLayout(motionTrackingForm);
@@ -3596,7 +3602,7 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	motionTrackingSectionLayout->addLayout(motionTrackingForm);
 
 	auto [motionControllerSectionFrame, motionControllerSectionLayout] =
-		makeMotionSection(motionControlsPane, QStringLiteral("Gimbal Motion"));
+		makeMotionSection(motionControlsPane, QStringLiteral("Motion Smoothing"));
 	motionControllerSection = motionControllerSectionFrame;
 	auto *motionControllerForm = new QFormLayout;
 	ConfigureFormLayout(motionControllerForm);
@@ -3616,14 +3622,14 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 	motionControlsScroll->setWidget(motionControlsPane);
 	motionEditorLayout->addWidget(motionControlsScroll, 1);
 
-	auto *motionAdvancedPane = new QWidget(motionSplitter);
+	motionAdvancedPane = new QWidget(motionSplitter);
 	motionAdvancedPane->setObjectName(QStringLiteral("switcherSettingsPane"));
 	motionAdvancedPane->setAttribute(Qt::WA_StyledBackground, true);
 	motionAdvancedPane->setMinimumWidth(280);
 	auto *motionAdvancedLayout = new QVBoxLayout(motionAdvancedPane);
 	motionAdvancedLayout->setContentsMargins(12, 12, 12, 12);
 	motionAdvancedLayout->setSpacing(10);
-	auto *motionProfilesTitle = new QLabel(QStringLiteral("AI Profiles"), motionAdvancedPane);
+	auto *motionProfilesTitle = new QLabel(QStringLiteral("Profiles And Legacy"), motionAdvancedPane);
 	motionProfilesTitle->setObjectName(QStringLiteral("switcherWorkspaceSettingsSectionTitle"));
 	motionAdvancedLayout->addWidget(motionProfilesTitle);
 	motionAdvancedLayout->addWidget(motionProfileList, 1);
@@ -4029,6 +4035,13 @@ SwitcherWorkspaceDock::SwitcherWorkspaceDock(QMainWindow *parent)
 		&SwitcherWorkspaceDock::MotionShotSceneChanged);
 	connect(motionShotItemCombo, qOverload<int>(&QComboBox::currentIndexChanged), this,
 		&SwitcherWorkspaceDock::MotionShotItemChanged);
+	connect(motionAdvancedControlsCheckBox, &QCheckBox::checkStateChanged, this, [this](Qt::CheckState state) {
+		if (loadingMotionUi)
+			return;
+		motionAdvancedControlsVisible = state == Qt::Checked;
+		RefreshMotionShotEditor();
+		emit WorkspaceStateChanged();
+	});
 	connect(motionProfileList, &QListWidget::currentRowChanged, this, &SwitcherWorkspaceDock::MotionSelectionChanged);
 	connect(motionAddButton, &QPushButton::clicked, this, &SwitcherWorkspaceDock::AddMotionProfile);
 	connect(motionDeleteButton, &QPushButton::clicked, this, &SwitcherWorkspaceDock::DeleteSelectedMotionProfile);
@@ -4996,6 +5009,7 @@ obs_data_t *SwitcherWorkspaceDock::SaveState()
 	obs_data_set_int(data, "mode_index", currentModeIndex);
 	obs_data_set_int(data, "quick_multiview_monitor", quickMultiviewMonitor);
 	obs_data_set_int(data, "quick_program_monitor", quickProgramMonitor);
+	obs_data_set_bool(data, "motion_advanced_controls_visible", motionAdvancedControlsVisible);
 	obs_data_set_string(data, "vertical_feed_mode", verticalFeedMode.toUtf8().constData());
 	obs_data_set_string(data, "vertical_feed_source_uuid", verticalFeedSourceUuid.toUtf8().constData());
 	obs_data_set_string(data, "vertical_feed_source_name", verticalFeedSourceName.toUtf8().constData());
@@ -5051,6 +5065,9 @@ void SwitcherWorkspaceDock::LoadState(obs_data_t *data)
 						? ClampedMonitorIndex(
 							  static_cast<int>(obs_data_get_int(data, "quick_program_monitor")))
 						: -2;
+		motionAdvancedControlsVisible = obs_data_has_user_value(data, "motion_advanced_controls_visible")
+							? obs_data_get_bool(data, "motion_advanced_controls_visible")
+							: false;
 		verticalFeedMode = obs_data_has_user_value(data, "vertical_feed_mode")
 					   ? QString::fromUtf8(obs_data_get_string(data, "vertical_feed_mode"))
 					   : QString::fromLatin1(kVerticalFeedProgram);
@@ -5061,6 +5078,7 @@ void SwitcherWorkspaceDock::LoadState(obs_data_t *data)
 		modeIndex = 0;
 		quickMultiviewMonitor = -2;
 		quickProgramMonitor = -2;
+		motionAdvancedControlsVisible = false;
 		verticalFeedMode = QString::fromLatin1(kVerticalFeedProgram);
 		verticalFeedSourceUuid.clear();
 		verticalFeedSourceName.clear();
@@ -7463,20 +7481,28 @@ void SwitcherWorkspaceDock::RefreshMotionShotEditor()
 				       : QString();
 	const auto shot = motionManager->ShotById(shotId);
 	const bool hasShot = !shot.id.isEmpty();
-	const auto setMotionModeSectionVisibility = [this](bool usesAi, bool usesLoop, bool visible) {
+	const bool showAdvanced = motionAdvancedControlsVisible;
+	if (motionAdvancedControlsCheckBox) {
+		QSignalBlocker blocker(motionAdvancedControlsCheckBox);
+		motionAdvancedControlsCheckBox->setChecked(showAdvanced);
+	}
+	if (motionAdvancedPane)
+		motionAdvancedPane->setVisible(showAdvanced);
+	const auto setMotionModeSectionVisibility = [this, showAdvanced](bool usesAi, bool usesLoop, bool visible) {
 		if (motionPositionSection)
-			motionPositionSection->setVisible(visible && usesLoop);
+			motionPositionSection->setVisible(showAdvanced && visible && usesLoop);
 		if (motionFramingSection)
-			motionFramingSection->setVisible(visible && usesAi);
+			motionFramingSection->setVisible(showAdvanced && visible && usesAi);
 		if (motionControllerSection)
-			motionControllerSection->setVisible(visible && usesAi);
+			motionControllerSection->setVisible(showAdvanced && visible && usesAi);
 		if (motionProfileSection)
-			motionProfileSection->setVisible(visible && usesAi);
+			motionProfileSection->setVisible(showAdvanced && visible && usesAi);
 		if (motionTrackingSection)
-			motionTrackingSection->setVisible(visible && usesAi);
+			motionTrackingSection->setVisible(showAdvanced && visible && usesAi);
 	};
 	for (auto *widget : {static_cast<QWidget *>(motionShotNameEdit),
 			     static_cast<QWidget *>(motionShotEnabledCheckBox),
+			     static_cast<QWidget *>(motionEnabledCheckBox),
 			     static_cast<QWidget *>(motionWorkstationStatusLabel),
 			     static_cast<QWidget *>(motionShotModeHintLabel),
 			     static_cast<QWidget *>(motionShotSceneCombo),
@@ -7484,6 +7510,8 @@ void SwitcherWorkspaceDock::RefreshMotionShotEditor()
 			     static_cast<QWidget *>(motionShotModeCombo),
 			     static_cast<QWidget *>(motionShotPlaybackCombo),
 			     static_cast<QWidget *>(motionShotPresetCombo),
+			     static_cast<QWidget *>(motionPresetCombo),
+			     static_cast<QWidget *>(motionFramingModeCombo),
 			     static_cast<QWidget *>(motionShotDurationSpin),
 			     static_cast<QWidget *>(motionShotDurationSlider),
 			     static_cast<QWidget *>(motionShotEasingCombo),
@@ -7509,7 +7537,7 @@ void SwitcherWorkspaceDock::RefreshMotionShotEditor()
 	if (!hasShot) {
 		setMotionModeSectionVisibility(false, false, false);
 		motionWorkstationStatusLabel->setText(QStringLiteral(
-			"<b>No shot selected.</b> Add a shot, bind a scene item, then edit target or position here."));
+			"<b>No shot selected.</b> Add from Program, then choose the scene item Motion should frame or move."));
 		if (motionScenePreview) {
 			motionScenePreview->SetPreviewActive(false);
 			motionScenePreview->SetSource(nullptr);
@@ -7532,7 +7560,7 @@ void SwitcherWorkspaceDock::RefreshMotionShotEditor()
 			? QStringLiteral("not bound")
 			: QStringLiteral("%1 / %2").arg(shot.sceneName.toHtmlEscaped(), shot.sourceName.toHtmlEscaped());
 	motionWorkstationStatusLabel->setText(
-		QStringLiteral("<b>%1:</b> %2<br><b>Bound:</b> %3 | final scene-item crop")
+		QStringLiteral("<b>%1:</b> %2<br><b>Input:</b> %3")
 			.arg(modeLabel.toHtmlEscaped(),
 			     shot.name.toHtmlEscaped(),
 			     bindingLabel));
@@ -7548,13 +7576,13 @@ void SwitcherWorkspaceDock::RefreshMotionShotEditor()
 	}
 	if (shot.shotMode == QStringLiteral("ai_auto_frame")) {
 		motionShotModeHintLabel->setText(QStringLiteral(
-			"AI controls below drive this shot. The source filter samples frames; the final crop is applied to this scene item."));
+			"Auto-framing follows the selected scene item. Style and framing are the normal controls; advanced tuning is optional."));
 	} else if (shot.shotMode == QStringLiteral("hybrid")) {
 		motionShotModeHintLabel->setText(QStringLiteral(
-			"AI tracking and the keyframe loop are both active. The final scene-item crop is clamped to avoid black edges."));
+			"Hybrid combines auto-framing with a keyframe move. Use advanced controls only for detailed timing or tracking changes."));
 	} else {
 		motionShotModeHintLabel->setText(QStringLiteral(
-			"Keyframe motion controls below drive this shot. AI tracking controls are inactive until the mode is AI or Hybrid."));
+			"Keyframe Loop uses the Move Preset first. Advanced controls expose exact timing, easing, pan, and zoom."));
 	}
 
 	motionShotNameEdit->setText(shot.name);

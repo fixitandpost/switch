@@ -545,6 +545,7 @@ private:
 	QPushButton *motionShotBindButton;
 	QLabel *motionWorkstationStatusLabel;
 	QLabel *motionShotModeHintLabel;
+	QCheckBox *motionAdvancedControlsCheckBox;
 	QLineEdit *motionShotNameEdit;
 	QCheckBox *motionShotEnabledCheckBox;
 	QComboBox *motionShotSceneCombo;
@@ -619,6 +620,7 @@ private:
 	QLabel *motionTargetStatusLabel;
 	QListWidget *motionTrackList;
 	SwitcherWorkspacePreview *motionScenePreview;
+	QWidget *motionAdvancedPane = nullptr;
 	QFrame *motionPositionSection;
 	QFrame *motionProfileSection;
 	QFrame *motionFramingSection;
@@ -689,6 +691,7 @@ private:
 	QString verticalFeedSourceName;
 	bool loadingAutomationUi = false;
 	bool loadingMotionUi = false;
+	bool motionAdvancedControlsVisible = false;
 	bool frontendFinishedLoading = false;
 	bool frontendShuttingDown = false;
 	bool frontendExiting = false;

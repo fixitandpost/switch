@@ -33,9 +33,136 @@ function Require-Command([string] $Name, [string] $Description) {
     return $command
 }
 
+function Get-ObsOwnedTopLevelWindows([System.Diagnostics.Process] $Process, [string[]] $WindowTitles) {
+    if ( ! $Process -or $Process.HasExited ) {
+        return @()
+    }
+
+    if ( ! ( 'SwitchReleaseVerify.WindowCloser' -as [type] ) ) {
+        Add-Type -Namespace SwitchReleaseVerify -Name WindowCloser -MemberDefinition @'
+public delegate bool EnumWindowsProc(System.IntPtr hWnd, System.IntPtr lParam);
+
+[DllImport("user32.dll")]
+public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, System.IntPtr lParam);
+
+[DllImport("user32.dll", SetLastError=true)]
+public static extern int GetWindowText(System.IntPtr hWnd, System.Text.StringBuilder lpString, int nMaxCount);
+
+[DllImport("user32.dll")]
+public static extern uint GetWindowThreadProcessId(System.IntPtr hWnd, out uint lpdwProcessId);
+
+[DllImport("user32.dll")]
+public static extern bool IsWindowVisible(System.IntPtr hWnd);
+
+[DllImport("user32.dll")]
+public static extern bool PostMessage(System.IntPtr hWnd, uint Msg, System.IntPtr wParam, System.IntPtr lParam);
+'@
+    }
+
+    $processId = [uint32] $Process.Id
+    $matches = New-Object System.Collections.Generic.List[object]
+    $callback = [SwitchReleaseVerify.WindowCloser+EnumWindowsProc] {
+        param([IntPtr] $hWnd, [IntPtr] $lParam)
+
+        [uint32] $windowProcessId = 0
+        [void] [SwitchReleaseVerify.WindowCloser]::GetWindowThreadProcessId($hWnd, [ref] $windowProcessId)
+        if ( $windowProcessId -ne $processId -or
+             ! [SwitchReleaseVerify.WindowCloser]::IsWindowVisible($hWnd) ) {
+            return $true
+        }
+
+        $title = New-Object System.Text.StringBuilder 512
+        [void] [SwitchReleaseVerify.WindowCloser]::GetWindowText($hWnd, $title, $title.Capacity)
+        $windowTitle = $title.ToString()
+        if ( $WindowTitles -contains $windowTitle ) {
+            $matches.Add([pscustomobject]@{
+                Handle = $hWnd
+                Title = $windowTitle
+            })
+        }
+
+        return $true
+    }
+
+    [void] [SwitchReleaseVerify.WindowCloser]::EnumWindows($callback, [IntPtr]::Zero)
+    return @($matches)
+}
+
+function Close-ObsOwnedTopLevelWindows(
+    [System.Diagnostics.Process] $Process,
+    [string[]] $WindowTitles,
+    [int] $TimeoutSeconds = 15
+) {
+    if ( ! $Process -or $Process.HasExited ) {
+        return
+    }
+
+    try {
+        Add-Type -AssemblyName UIAutomationClient
+        Add-Type -AssemblyName UIAutomationTypes
+    } catch {
+        Write-Host "UI Automation is unavailable; skipping OBS-owned window pre-close."
+        return
+    }
+
+    $findWindows = {
+        if ( ! $Process -or $Process.HasExited ) {
+            return @()
+        }
+
+        $root = [System.Windows.Automation.AutomationElement]::RootElement
+        $pidCondition = New-Object System.Windows.Automation.PropertyCondition(
+            [System.Windows.Automation.AutomationElement]::ProcessIdProperty,
+            $Process.Id
+        )
+        $elements = $root.FindAll([System.Windows.Automation.TreeScope]::Descendants, $pidCondition)
+        $windows = @()
+        for ( $index = 0; $index -lt $elements.Count; $index++ ) {
+            $element = $elements.Item($index)
+            if ( $element.Current.ControlType -ne [System.Windows.Automation.ControlType]::Window ) {
+                continue
+            }
+            if ( $WindowTitles -notcontains $element.Current.Name ) {
+                continue
+            }
+            $windows += $element
+        }
+        return $windows
+    }
+
+    foreach ( $window in (& $findWindows) ) {
+        Write-Host "Closing OBS-owned window '$($window.Current.Name)'"
+        try {
+            $pattern = $window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern)
+            $pattern.Close()
+        } catch {
+            Write-Host "Could not close OBS-owned window '$($window.Current.Name)': $($_.Exception.Message)"
+        }
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ( (Get-Date) -lt $deadline ) {
+        $Process.Refresh()
+        if ( $Process.HasExited ) {
+            return
+        }
+
+        if ( (& $findWindows).Count -eq 0 ) {
+            return
+        }
+
+        Start-Sleep -Milliseconds 500
+    }
+}
+
 function Close-ObsGracefully([System.Diagnostics.Process[]] $Processes, [int] $TimeoutSeconds = 60) {
     foreach ( $process in $Processes ) {
         if ( ! $process -or $process.HasExited ) {
+            continue
+        }
+
+        Close-ObsOwnedTopLevelWindows $process @('Switch')
+        if ( $process.HasExited ) {
             continue
         }
 
@@ -157,7 +284,7 @@ Require-File (Join-Path $PackageRoot 'data/obs-plugins/switch/remote/web/index.h
 
 if ( ! $SkipInstall ) {
     Write-Host "Installing packaged plugin into ${ObsRoot}"
-    Close-ObsGracefully (Get-Process obs64 -ErrorAction SilentlyContinue)
+    Close-ObsGracefully -Processes (Get-Process obs64 -ErrorAction SilentlyContinue)
     if ( ! [string]::IsNullOrWhiteSpace($MotionModelUrl) ) {
         $env:SWITCH_MOTION_MODEL_URL = $MotionModelUrl
     }
@@ -193,7 +320,7 @@ if ( ! $SkipLaunch ) {
         Write-Host "Verified Switch load in ${matchedLog}"
     } finally {
         if ( ! $obs.HasExited ) {
-            Close-ObsGracefully @($obs) 60
+            Close-ObsGracefully -Processes @($obs) -TimeoutSeconds 60
         }
     }
 }
