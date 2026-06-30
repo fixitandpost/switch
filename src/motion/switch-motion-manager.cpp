@@ -2089,6 +2089,7 @@ bool SwitchMotionManager::UpsertShot(const SwitchMotionShot &shot, QString *effe
 		RefreshSourceFilterForUuid(previousSourceUuid);
 	RefreshSourceFilterForUuid(normalized.sourceUuid);
 	StartShotTimer();
+	TickMotionShots();
 	emit ShotChanged(normalized.id);
 	emit StateChanged();
 	return true;

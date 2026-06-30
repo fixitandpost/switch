@@ -6594,7 +6594,17 @@ bool SwitcherWorkspaceDock::DeleteCanvasScene(const QString &canvasId, const QSt
 		}
 	}
 
-	return !sceneName.isEmpty() && canvasManager->RemoveVerticalScene(sceneName);
+	if (sceneName.isEmpty())
+		return false;
+
+	if (canvasManager->RemoveVerticalScene(sceneName))
+		return true;
+
+	for (const auto &scene : canvasManager->ScenesForCanvas(canvasId)) {
+		if (scene.uuid == sceneIdOrName || scene.name == sceneIdOrName || scene.name == sceneName)
+			return false;
+	}
+	return true;
 }
 
 bool SwitcherWorkspaceDock::RenameCanvasScene(const QString &canvasId, const QString &sceneIdOrName, const QString &name)

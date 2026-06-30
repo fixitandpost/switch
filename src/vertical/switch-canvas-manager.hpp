@@ -187,6 +187,7 @@ private:
 	QVector<SwitchCanvasDescriptor> canvases;
 	QVector<SwitchCanvasLink> links;
 	QStringList verticalSceneNames;
+	QStringList removedVerticalSceneNames;
 	SwitchCanvasOutputSettings verticalOutputSettings;
 	obs_canvas_t *verticalCanvas = nullptr;
 	QVector<OBSSource> transitions;

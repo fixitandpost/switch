@@ -64,6 +64,8 @@ bool CollectCanvasSceneById(void *param, obs_source_t *source)
 	auto *lookup = static_cast<CanvasSceneLookup *>(param);
 	if (!lookup || !source)
 		return true;
+	if (obs_source_removed(source))
+		return true;
 
 	const QString uuid = QString::fromUtf8(obs_source_get_uuid(source));
 	const QString name = QString::fromUtf8(obs_source_get_name(source));
@@ -81,6 +83,8 @@ bool CollectCanvasScenes(void *param, obs_source_t *source)
 {
 	auto *collector = static_cast<SceneDescriptorsCollector *>(param);
 	if (!collector || !collector->scenes || !source)
+		return true;
+	if (obs_source_removed(source))
 		return true;
 
 	collector->scenes->push_back(
@@ -711,6 +715,11 @@ void SwitchCanvasManager::EnsureVerticalSceneList()
 
 	const QVector<SwitchCanvasSceneDescriptor> existingScenes = ScenesForCanvas(VerticalCanvasId());
 	QStringList desiredScenes = verticalSceneNames;
+	desiredScenes.erase(std::remove_if(desiredScenes.begin(), desiredScenes.end(),
+					   [&](const QString &sceneName) {
+						   return removedVerticalSceneNames.contains(sceneName, Qt::CaseInsensitive);
+					   }),
+			    desiredScenes.end());
 	if (desiredScenes.isEmpty() && existingScenes.isEmpty())
 		desiredScenes.push_back(QString::fromUtf8(kDefaultVerticalSceneName));
 
@@ -737,10 +746,26 @@ void SwitchCanvasManager::EnsureVerticalSceneList()
 
 void SwitchCanvasManager::RebuildVerticalSceneCache()
 {
-	verticalSceneNames.clear();
-	const QVector<SwitchCanvasSceneDescriptor> scenes = ScenesForCanvas(VerticalCanvasId());
-	for (const auto &scene : scenes)
-		verticalSceneNames.push_back(scene.name);
+	QStringList nextSceneNames = verticalSceneNames;
+	nextSceneNames.erase(std::remove_if(nextSceneNames.begin(), nextSceneNames.end(),
+					    [&](const QString &sceneName) {
+						    return removedVerticalSceneNames.contains(sceneName, Qt::CaseInsensitive);
+					    }),
+			     nextSceneNames.end());
+
+	if (verticalCanvas && !obs_canvas_removed(verticalCanvas)) {
+		QVector<SwitchCanvasSceneDescriptor> liveScenes;
+		SceneDescriptorsCollector collector{&liveScenes};
+		obs_canvas_enum_scenes(verticalCanvas, CollectCanvasScenes, &collector);
+		for (const auto &scene : liveScenes) {
+			if (removedVerticalSceneNames.contains(scene.name, Qt::CaseInsensitive))
+				continue;
+			if (!nextSceneNames.contains(scene.name, Qt::CaseInsensitive))
+				nextSceneNames.push_back(scene.name);
+		}
+	}
+
+	verticalSceneNames = nextSceneNames;
 	if (verticalSceneNames.isEmpty())
 		verticalSceneNames.push_back(QString::fromUtf8(kDefaultVerticalSceneName));
 }
@@ -763,13 +788,24 @@ QVector<SwitchCanvasSceneDescriptor> SwitchCanvasManager::ScenesForCanvas(const 
 		return scenes;
 	}
 
-	if (canvasId == VerticalCanvasId() && suppressCanvasRender) {
+	if (canvasId == VerticalCanvasId() && !ensuringVerticalSceneList) {
 		const int verticalIndex = FindCanvasIndex(VerticalCanvasId());
 		const QString activeSceneUuid = verticalIndex >= 0 ? canvases[verticalIndex].activeSceneUuid : QString();
 		const QString activeSceneName = verticalIndex >= 0 ? canvases[verticalIndex].activeSceneName : QString();
 		for (const auto &sceneName : verticalSceneNames) {
-			scenes.push_back({sceneName == activeSceneName ? activeSceneUuid : QString(), sceneName});
+			if (removedVerticalSceneNames.contains(sceneName, Qt::CaseInsensitive))
+				continue;
+			QString sceneUuid = sceneName == activeSceneName ? activeSceneUuid : QString();
+			if (sceneUuid.isEmpty() && verticalCanvas && !obs_canvas_removed(verticalCanvas) && !suppressCanvasRender) {
+				OBSSourceAutoRelease sceneSource =
+					obs_canvas_get_source_by_name(verticalCanvas, sceneName.toUtf8().constData());
+				if (sceneSource && !obs_source_removed(sceneSource))
+					sceneUuid = QString::fromUtf8(obs_source_get_uuid(sceneSource));
+			}
+			scenes.push_back({sceneUuid, sceneName});
 		}
+		if (scenes.isEmpty())
+			scenes.push_back({QString(), QString::fromUtf8(kDefaultVerticalSceneName)});
 		return scenes;
 	}
 
@@ -779,12 +815,21 @@ QVector<SwitchCanvasSceneDescriptor> SwitchCanvasManager::ScenesForCanvas(const 
 
 	SceneDescriptorsCollector collector{&scenes};
 	obs_canvas_enum_scenes(canvas, CollectCanvasScenes, &collector);
+	if (canvasId == VerticalCanvasId()) {
+		scenes.erase(std::remove_if(scenes.begin(), scenes.end(),
+					    [&](const SwitchCanvasSceneDescriptor &scene) {
+						    return removedVerticalSceneNames.contains(scene.name, Qt::CaseInsensitive);
+					    }),
+			     scenes.end());
+	}
 
 	if (scenes.isEmpty() && canvasId == VerticalCanvasId()) {
 		for (const auto &sceneName : verticalSceneNames) {
+			if (removedVerticalSceneNames.contains(sceneName, Qt::CaseInsensitive))
+				continue;
 			OBSSourceAutoRelease sceneSource =
 				obs_canvas_get_source_by_name(canvas, sceneName.toUtf8().constData());
-			if (!sceneSource)
+			if (!sceneSource || obs_source_removed(sceneSource))
 				continue;
 			scenes.push_back(
 				{QString::fromUtf8(obs_source_get_uuid(sceneSource)), QString::fromUtf8(obs_source_get_name(sceneSource))});
@@ -1005,6 +1050,7 @@ bool SwitchCanvasManager::CreateVerticalScene(const QString &baseName, QString *
 	blog(LOG_INFO, "[Switch] CreateVerticalScene created name='%s' ptr=%p", sceneName.toUtf8().constData(), scene);
 	obs_scene_release(scene);
 
+	removedVerticalSceneNames.removeAll(sceneName);
 	if (!verticalSceneNames.contains(sceneName, Qt::CaseInsensitive))
 		verticalSceneNames.push_back(sceneName);
 	if (createdName)
@@ -1050,6 +1096,7 @@ bool SwitchCanvasManager::DuplicateVerticalScene(const QString &sceneUuidOrName,
 	}
 	obs_source_release(duplicateSource);
 
+	removedVerticalSceneNames.removeAll(sceneName);
 	if (!verticalSceneNames.contains(sceneName, Qt::CaseInsensitive))
 		verticalSceneNames.push_back(sceneName);
 	if (createdName)
@@ -1088,6 +1135,7 @@ bool SwitchCanvasManager::RenameVerticalScene(const QString &sceneUuidOrName, co
 	const QString previousName = QString::fromUtf8(obs_source_get_name(sceneSource));
 	obs_source_set_name(sceneSource, QT_TO_UTF8(trimmedName));
 	obs_source_release(sceneSource);
+	removedVerticalSceneNames.removeAll(trimmedName);
 	for (QString &sceneName : verticalSceneNames) {
 		if (sceneName == previousName)
 			sceneName = trimmedName;
@@ -1121,7 +1169,8 @@ bool SwitchCanvasManager::CanRemoveVerticalScene(const QString &sceneUuidOrName,
 	}
 
 	const auto scenes = ScenesForCanvas(VerticalCanvasId());
-	if (scenes.size() <= 1) {
+	const qsizetype sceneCount = std::max(scenes.size(), verticalSceneNames.size());
+	if (sceneCount <= 1) {
 		setReason(QStringLiteral("Switch keeps one vertical scene available so the vertical canvas cannot go blank."));
 		return false;
 	}
@@ -1137,8 +1186,16 @@ bool SwitchCanvasManager::CanRemoveVerticalScene(const QString &sceneUuidOrName,
 	}
 
 	if (targetName.isEmpty()) {
-		setReason(QStringLiteral("The selected vertical scene no longer exists."));
-		return false;
+		for (const auto &sceneName : verticalSceneNames) {
+			if (sceneName == sceneUuidOrName) {
+				targetName = sceneName;
+				break;
+			}
+		}
+		if (targetName.isEmpty()) {
+			setReason(QStringLiteral("The selected vertical scene no longer exists."));
+			return false;
+		}
 	}
 
 	const auto descriptor = CanvasDescriptor(VerticalCanvasId());
@@ -1160,6 +1217,23 @@ bool SwitchCanvasManager::RemoveVerticalScene(const QString &sceneName)
 
 	QString refusalReason;
 	if (!CanRemoveVerticalScene(sceneName, &refusalReason)) {
+		if (refusalReason == QStringLiteral("The selected vertical scene no longer exists.")) {
+			if (!removedVerticalSceneNames.contains(sceneName, Qt::CaseInsensitive))
+				removedVerticalSceneNames.push_back(sceneName);
+			verticalSceneNames.erase(std::remove_if(verticalSceneNames.begin(), verticalSceneNames.end(),
+								[&](const QString &name) {
+									return name.compare(sceneName, Qt::CaseInsensitive) == 0;
+								}),
+						verticalSceneNames.end());
+			links.erase(std::remove_if(links.begin(), links.end(),
+						   [&](const SwitchCanvasLink &link) {
+							   return link.targetSceneName == sceneName;
+						   }),
+				    links.end());
+			RebuildVerticalSceneCache();
+			emit StateChanged();
+			return true;
+		}
 		blog(LOG_WARNING, "[Switch] Refused to remove vertical scene '%s': %s", sceneName.toUtf8().constData(),
 		     refusalReason.toUtf8().constData());
 		return false;
@@ -1167,22 +1241,58 @@ bool SwitchCanvasManager::RemoveVerticalScene(const QString &sceneName)
 
 	SuspendCanvasRendering();
 
+	auto rememberRemovedScene = [&](const QString &removedName) {
+		if (removedName.trimmed().isEmpty())
+			return;
+		if (!removedVerticalSceneNames.contains(removedName, Qt::CaseInsensitive))
+			removedVerticalSceneNames.push_back(removedName);
+	};
+
+	auto removeCachedScene = [&]() {
+		rememberRemovedScene(sceneName);
+		const qsizetype beforeSize = verticalSceneNames.size();
+		verticalSceneNames.erase(std::remove_if(verticalSceneNames.begin(), verticalSceneNames.end(),
+							[&](const QString &name) {
+								return name.compare(sceneName, Qt::CaseInsensitive) == 0;
+							}),
+					verticalSceneNames.end());
+		if (verticalSceneNames.size() == beforeSize)
+			return false;
+
+		links.erase(std::remove_if(links.begin(), links.end(),
+					   [&](const SwitchCanvasLink &link) {
+						   return link.targetSceneName == sceneName;
+					   }),
+			    links.end());
+		RebuildVerticalSceneCache();
+		emit StateChanged();
+		ScheduleCanvasRenderingResume(350);
+		return true;
+	};
+
 	obs_source_t *sceneSource = ResolveCanvasScene(verticalCanvas, sceneName);
 	if (!sceneSource) {
+		if (removeCachedScene())
+			return true;
 		ScheduleCanvasRenderingResume();
 		return false;
 	}
 
 	const QString resolvedName = QString::fromUtf8(obs_source_get_name(sceneSource));
 	const QString resolvedUuid = QString::fromUtf8(obs_source_get_uuid(sceneSource));
+	rememberRemovedScene(resolvedName);
+	rememberRemovedScene(sceneName);
 	obs_scene_t *scene = obs_scene_from_source(sceneSource);
 	if (!scene) {
 		obs_source_release(sceneSource);
+		if (removeCachedScene())
+			return true;
 		ScheduleCanvasRenderingResume();
 		return false;
 	}
 
 	obs_canvas_scene_remove(scene);
+	obs_source_remove(sceneSource);
 	obs_source_release(sceneSource);
 	verticalSceneNames.erase(std::remove_if(verticalSceneNames.begin(), verticalSceneNames.end(),
 						[&](const QString &name) {
@@ -1780,8 +1890,31 @@ void SwitchCanvasManager::HandleSourceRemoved(obs_source_t *source)
 		    links.end());
 
 	if (verticalSceneNames.contains(sourceName)) {
+		if (!removedVerticalSceneNames.contains(sourceName, Qt::CaseInsensitive))
+			removedVerticalSceneNames.push_back(sourceName);
 		verticalSceneNames.removeAll(sourceName);
 		RebuildVerticalSceneCache();
+	}
+
+	const int verticalIndex = FindCanvasIndex(VerticalCanvasId());
+	if (verticalIndex >= 0 &&
+	    ((!sourceUuid.isEmpty() && canvases[verticalIndex].activeSceneUuid == sourceUuid) ||
+	     canvases[verticalIndex].activeSceneName == sourceName)) {
+		canvases[verticalIndex].activeSceneUuid.clear();
+		canvases[verticalIndex].activeSceneName.clear();
+		QPointer<SwitchCanvasManager> self(this);
+		QTimer::singleShot(0, this, [self]() {
+			if (!self)
+				return;
+			if (!self->EnsureVerticalCanvas())
+				return;
+			self->EnsureVerticalSceneList();
+			const auto scenes = self->ScenesForCanvas(self->VerticalCanvasId());
+			if (!scenes.isEmpty())
+				self->SetCanvasActiveScene(self->VerticalCanvasId(),
+						       !scenes.front().uuid.isEmpty() ? scenes.front().uuid
+										      : scenes.front().name);
+		});
 	}
 
 	emit StateChanged();
