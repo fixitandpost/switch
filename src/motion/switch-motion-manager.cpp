@@ -2103,13 +2103,18 @@ bool SwitchMotionManager::DeleteShot(const QString &shotId)
 	if (index < 0)
 		return false;
 	const auto shot = shots[index];
+	const bool removedActiveShot = activeShotId == shotId;
 	RestoreShotTransform(ShotTransformKey(shot));
 	shots.removeAt(index);
-	if (activeShotId == shotId)
+	if (removedActiveShot)
 		activeShotId.clear();
 	RefreshSourceFilterForUuid(shot.sourceUuid);
-	if (shots.isEmpty())
+	if (shots.isEmpty()) {
 		StopShotTimer();
+		ClearRuntimeForSource(shot.sourceUuid);
+	} else if (removedActiveShot || !SourceHasShot(shots, shot.sourceUuid)) {
+		ClearRuntimeForSource(shot.sourceUuid);
+	}
 	emit ShotChanged(shotId);
 	emit StateChanged();
 	return true;
@@ -2121,11 +2126,16 @@ bool SwitchMotionManager::SetShotEnabled(const QString &shotId, bool enabled)
 	if (index < 0)
 		return false;
 	shots[index].enabled = enabled;
+	const auto shot = shots[index];
 	if (!enabled)
-		RestoreShotTransform(ShotTransformKey(shots[index]));
-	RefreshSourceFilterForUuid(shots[index].sourceUuid);
+		RestoreShotTransform(ShotTransformKey(shot));
+	RefreshSourceFilterForUuid(shot.sourceUuid);
 	if (enabled)
 		StartShotTimer();
+	else if (!SourceHasShot(shots, shot.sourceUuid))
+		ClearRuntimeForSource(shot.sourceUuid);
+	if (!std::any_of(shots.cbegin(), shots.cend(), [](const SwitchMotionShot &candidate) { return candidate.enabled; }))
+		StopShotTimer();
 	emit ShotChanged(shotId);
 	emit StateChanged();
 	return true;
@@ -2489,6 +2499,48 @@ void SwitchMotionManager::RestoreShotTransform(const QString &shotKey)
 		obs_sceneitem_set_info2(item, &shotBaseTransforms[shotKey]);
 	obs_source_release(sceneSource);
 	shotBaseTransforms.remove(shotKey);
+}
+
+void SwitchMotionManager::ClearRuntimeForSource(const QString &sourceUuid)
+{
+	SwitchMotionRuntimeState previous;
+	SwitchMotionRuntimeState next;
+	bool shouldEmit = false;
+	{
+		std::lock_guard<std::mutex> lock(runtimeStateMutex);
+		if (!sourceUuid.isEmpty() && !runtimeState.sourceUuid.isEmpty() && runtimeState.sourceUuid != sourceUuid)
+			return;
+
+		previous = runtimeState;
+		runtimeState.sourceUuid.clear();
+		runtimeState.status = runtimeState.modelAvailable ? QStringLiteral("ready") : QStringLiteral("model_missing");
+		runtimeState.message = runtimeState.modelAvailable ? QString() : InstallerManagedModelMissingMessage();
+		runtimeState.targetActive = false;
+		runtimeState.targetConfidence = 0.0f;
+		runtimeState.targetTrackId = -1;
+		runtimeState.targetState.clear();
+		runtimeState.camX = 0.0f;
+		runtimeState.camY = 0.0f;
+		runtimeState.zoom = 1.0f;
+		runtimeState.tracks.clear();
+		runtimeState.activeTrackCount = 0;
+		runtimeState.activeShotId.clear();
+		runtimeState.activeShotName.clear();
+		runtimeState.activeShotMode.clear();
+		runtimeState.activeShotPlaybackMode.clear();
+		runtimeState.activeShotPhaseMs = 0;
+		runtimeState.activeShotCamX = 0.0f;
+		runtimeState.activeShotCamY = 0.0f;
+		runtimeState.activeShotZoom = 1.0f;
+		next = runtimeState;
+		shouldEmit = previous.targetActive || !previous.sourceUuid.isEmpty() || !previous.activeShotId.isEmpty() ||
+			     !previous.tracks.isEmpty() || previous.activeTrackCount != 0;
+	}
+
+	if (shouldEmit) {
+		EmitTargetIfChanged(previous, next);
+		emit RuntimeStatsChanged();
+	}
 }
 
 bool SwitchMotionManager::ApplyShotTransform(const SwitchMotionShot &shot, const SwitchMotionCameraState &state,

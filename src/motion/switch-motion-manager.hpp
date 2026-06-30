@@ -294,6 +294,7 @@ private:
 	void TickMotionShots();
 	void RestoreAllShotTransforms();
 	void RestoreShotTransform(const QString &shotKey);
+	void ClearRuntimeForSource(const QString &sourceUuid = QString());
 	bool ApplyShotTransform(const SwitchMotionShot &shot, const SwitchMotionCameraState &state, QString *message);
 	SwitchMotionShot *ShotForSceneUuid(const QString &sceneUuid);
 	QString CurrentProgramSceneUuid(QString *sceneName = nullptr) const;
